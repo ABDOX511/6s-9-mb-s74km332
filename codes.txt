@@ -1,0 +1,980 @@
+<files>
+<file name="Whatsapp_web\src\config\configLoader.js">
+<![CDATA[
+const fs = require('fs');
+const path = require('path');
+const { CONFIG_DIR } = require('./paths');
+
+let config = require('./delays');
+
+const configPath = path.join(CONFIG_DIR, 'delays.js');
+
+const loadConfig = () => {
+    try {
+        delete require.cache[require.resolve(configPath)];
+        config = require(configPath);
+        console.log('Configuration loaded:', config); // Log the loaded configuration
+    } catch (error) {
+        console.error('Error loading configuration:', error.message);
+    }
+};
+
+const watchConfig = () => {
+    fs.watch(configPath, (eventType, filename) => {
+        if (eventType === 'change') {
+            console.log(`Configuration file changed. Reloading...`);
+            loadConfig();
+        }
+    });
+};
+
+watchConfig();
+
+const getConfig = () => config;
+
+module.exports = {
+    getConfig
+};
+]]>
+</file>
+<file name="Whatsapp_web\src\config\delays.js">
+<![CDATA[
+// config/delays.js
+
+module.exports = {
+  MESSAGE_DELAY_MIN: process.env.MESSAGE_DELAY_MIN ? parseInt(process.env.MESSAGE_DELAY_MIN, 10) : 15000,
+  MESSAGE_DELAY_MAX: process.env.MESSAGE_DELAY_MAX ? parseInt(process.env.MESSAGE_DELAY_MAX, 10) : 35000,
+  REST_DELAY_MIN: process.env.REST_DELAY_MIN ? parseInt(process.env.REST_DELAY_MIN, 10) : 60000,
+  REST_DELAY_MAX: process.env.REST_DELAY_MAX ? parseInt(process.env.REST_DELAY_MAX, 10) : 120000,
+  MESSAGE_LIMIT_BEFORE_DELAY: process.env.MESSAGE_LIMIT_BEFORE_DELAY ? parseInt(process.env.MESSAGE_LIMIT_BEFORE_DELAY, 10) : 10 // Ensure this line has a comma at the end
+};
+]]>
+</file>
+<file name="Whatsapp_web\src\controllers\clientController.js">
+<![CDATA[
+const path = require('path');
+const { SERVICES_DIR, LOGGER_DIR } = require('../config/paths');
+
+const {
+  getClient,
+  terminateClient,
+  getAllClients,
+  terminateAllClientsService
+} = require(path.join(SERVICES_DIR, 'clientService'));
+
+const { logClientEvent } = require(path.join(LOGGER_DIR, 'logUtils'));
+
+
+const terminateClients = async (req, res) => {
+    const { clientId } = req.body;
+
+    if (!clientId) {
+        return res.status(400).json({ message: 'Client ID is required' });
+    }
+
+    let clientsToTerminate = {};
+
+    try {
+        if (clientId === 'all') {
+            clientsToTerminate = getAllClients();
+        } else if (Array.isArray(clientId)) {
+            const clientIds = clientId.flatMap(id => id.split(',').map(id => id.trim()));
+            clientsToTerminate = clientIds.reduce((acc, id) => {
+                const client = getClient(id);
+                if (client) {
+                    acc[id] = client;
+                }
+                return acc;
+            }, {});
+        } else if (typeof clientId === 'string') {
+            const clientIds = clientId.split(',').map(id => id.trim());
+            clientsToTerminate = clientIds.reduce((acc, id) => {
+                const client = getClient(id);
+                if (client) {
+                    acc[id] = client;
+                }
+                return acc;
+            }, {});
+        } else {
+            return res.status(400).json({ message: 'Invalid clientId format' });
+        }
+
+        if (Object.keys(clientsToTerminate).length === 0) {
+            return res.status(404).json({ message: 'No clients found to terminate' });
+        }
+
+        await terminateAllClientsService();
+        logClientEvent('all', 'info', 'Requested clients terminated successfully');
+        res.json({ message: 'Requested clients terminated successfully' });
+    } catch (error) {
+        logClientEvent('all', 'error', `Error terminating clients: ${error.message}`);
+        res.status(500).json({ message: 'Failed to terminate clients', error: error.message });
+    }
+};
+
+module.exports = {
+    terminateClients
+};
+]]>
+</file>
+<file name="Whatsapp_web\src\controllers\messageController.js">
+<![CDATA[
+const path = require('path');
+const {
+  SERVICES_DIR,
+  MEDIA_DIR,
+  LOGGER_DIR,
+  CONFIG_DIR
+} = require('../config/paths');
+
+const { getClient } = require(path.join(SERVICES_DIR, 'clientService'));
+const { extractMediaPath, createMessageMedia } = require(path.join(MEDIA_DIR, 'mediaUtils'));
+const { logMessageStatus } = require(path.join(LOGGER_DIR, 'logUtils'));
+const { getConfig } = require(path.join(CONFIG_DIR, 'configLoader'));
+
+
+// Function to send a message to a client
+const sendMessageToClient = (clientProcess, phoneNumber, message, mediaPath, userId, leadID) => {
+    return new Promise((resolve, reject) => {
+        const messageHandler = (msg) => {
+            if (msg.type === 'message_sent' && msg.phoneNumber === phoneNumber) {
+                resolve();
+                clientProcess.off('message', messageHandler); // Remove listener
+            } else if (msg.type === 'message_error' && msg.phoneNumber === phoneNumber) {
+                reject(new Error(msg.error));
+                clientProcess.off('message', messageHandler); // Remove listener
+            }
+        };
+
+        clientProcess.on('message', messageHandler);
+
+        // Extract media path if not provided directly
+        if (!mediaPath) {
+            const extracted = extractMediaPath(message);
+            mediaPath = extracted.mediaPath;
+            message = extracted.cleanMessage;
+        }
+
+        clientProcess.send({ type: 'send_message', phoneNumber, message, mediaPath, userId, leadID });
+    });
+};
+
+// Function to process the campaign queue with proper delays
+const processCampaignQueue = async (clientId) => {
+    const clientEntry = getClient(clientId);
+    if (!clientEntry || clientEntry.isProcessingQueue || clientEntry.campaignQueue.length === 0) return;
+
+    clientEntry.isProcessingQueue = true;
+    const { campaignQueue, process: clientProcess } = clientEntry;
+    const config = getConfig(); // Call getConfig once
+    const { MESSAGE_DELAY_MIN, MESSAGE_DELAY_MAX, REST_DELAY_MIN, REST_DELAY_MAX } = config;
+
+    let messageCount = 0;
+
+    while (campaignQueue.length > 0) {
+        const messageData = campaignQueue.shift();
+        try {
+            await sendMessageToClient(
+                clientProcess,
+                messageData.phoneNumber,
+                messageData.message,
+                messageData.mediaPath,
+                clientId,
+                messageData.leadID // Ensure leadID is included
+            );
+        } catch (error) {
+            console.error(`Error processing campaign queue for ${messageData.phoneNumber}:`, error);
+        }
+
+        messageCount++;
+        // Determine the delay based on message count
+        const delay = getDelay(messageCount, config); // Use the cached config
+        
+        // Pause processing for the calculated delay
+        await delayExecution(delay);
+    }
+
+    clientEntry.isProcessingQueue = false;
+};
+
+// Utility functions for delay calculation and execution
+const getDelay = (messageCount, config) => {
+  const { REST_DELAY_MIN, REST_DELAY_MAX, MESSAGE_DELAY_MIN, MESSAGE_DELAY_MAX, MESSAGE_LIMIT_BEFORE_DELAY } = config;
+  return (messageCount % MESSAGE_LIMIT_BEFORE_DELAY === 0) // Use the new configurable limit
+      ? Math.random() * (REST_DELAY_MAX - REST_DELAY_MIN) + REST_DELAY_MIN
+      : Math.random() * (MESSAGE_DELAY_MAX - MESSAGE_DELAY_MIN) + MESSAGE_DELAY_MIN;
+};
+
+const delayExecution = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Function to handle incoming send message requests
+const sendMessage = async (req, res) => {
+    try {
+        const requestData = req.body.request;
+        if (!requestData) {
+            return res.status(400).json({ message: 'Request data is missing' });
+        }
+
+        const { properties, auth, bindings } = requestData;
+        const { phone_number: rawPhoneNumber, message_text: messageText, LINK: mediaPath } = properties || {};
+        const clientID = auth?.user_id;
+        const leadID = bindings && bindings.length > 0 ? bindings[0].OWNER_ID : null;
+
+        if (!rawPhoneNumber || !clientID) {
+            return res.status(400).json({ message: 'Phone number or clientID is missing' });
+        }
+
+        // Format the phone number
+        const phoneNumber = rawPhoneNumber.replace(/^\+/, '').replace(/\D/g, '') + '@c.us';
+
+        if (!messageText && !mediaPath) {
+            return res.status(400).json({ message: 'Message text or media path is missing' });
+        }
+
+        const clientEntry = getClient(clientID);
+        if (!clientEntry || !clientEntry.isActive) {
+            return res.status(400).json({ message: 'Failed to send message', status: 'undelivered' });
+        }
+
+        let finalMediaPath = mediaPath;
+        let message = messageText || "";
+
+        // Extract media path if not provided directly
+        if (!finalMediaPath) {
+            const extracted = extractMediaPath(message);
+            finalMediaPath = extracted.mediaPath;
+            message = extracted.cleanMessage;
+        }
+
+        // If the request is from the 'sender' module, add it to the campaign queue
+        if (requestData.module_id === 'sender') {
+            clientEntry.campaignQueue.push({ phoneNumber, message, mediaPath: finalMediaPath, leadID });
+            processCampaignQueue(clientID);
+            return res.json({ message: 'Message added to campaign queue' });
+        }
+
+        // Otherwise, send the message immediately
+        await sendMessageToClient(clientEntry.process, phoneNumber, message, finalMediaPath, clientID, leadID);
+        return res.json({ message: 'Message sent successfully', status: 'delivered', OWNER_ID: leadID });
+    } catch (error) {
+        console.error(`Failed to send message:`, error);
+        return res.status(500).json({ message: 'Failed to send message', status: 'undelivered', OWNER_ID: null, error: error.message });
+    }
+};
+
+module.exports = {
+    processCampaignQueue,
+    sendMessage
+};
+]]>
+</file>
+<file name="Whatsapp_web\src\server.js">
+<![CDATA[
+require('dotenv').config();
+const express = require('express');
+const bodyParser = require('body-parser');
+const path = require('path');
+
+const {
+  SERVICES_DIR,
+  CONTROLLERS_DIR,
+  LOGGER_DIR,
+  PUBLIC_DIR,
+  VIEWS_DIR
+} = require('./config/paths');
+
+const {
+  initializeClient,
+  terminateClient,
+  terminateAllClientsService
+} = require(path.join(SERVICES_DIR, 'clientService'));
+
+const { sendMessage } = require(path.join(CONTROLLERS_DIR, 'messageController'));
+const { terminateClients } = require(path.join(CONTROLLERS_DIR, 'clientController'));
+const { logServerEvent } = require(path.join(LOGGER_DIR, 'logUtils'));
+
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.use(bodyParser.json());
+
+// Serve static files from the public directory
+app.use(express.static(PUBLIC_DIR));
+
+app.post('/sendMessage', sendMessage);
+
+app.post('/addclient', async (req, res) => {
+    const { clientId } = req.body;
+    if (!clientId || clientId.length === 0) {
+        return res.status(400).json({ message: 'Client ID is required' });
+    }
+
+    try {
+        const clientIds = Array.isArray(clientId) ? clientId.flatMap(id => id.split(',').map(id => id.trim())) : [clientId];
+        await Promise.all(clientIds.map(id => initializeClient(id)));
+        res.json({ message: `Clients ${clientIds.join(', ')} are being initialized` });
+    } catch (error) {
+        res.status(500).json({ message: 'Failed to initialize clients', error: error.message });
+    }
+});
+
+app.post('/endclient', terminateClients);
+
+app.post('/terminateClient', async (req, res) => {
+    const { clientId } = req.body;
+    if (!clientId) {
+        return res.status(400).json({ message: 'Client ID is required' });
+    }
+
+    try {
+        terminateClient(clientId);
+        res.json({ message: `Client ${clientId} terminated successfully` });
+    } catch (error) {
+        res.status(500).json({ message: 'Failed to terminate client', error: error.message });
+    }
+});
+
+// Add QR code endpoint
+app.get('/qr/:userID', async (req, res) => {
+    const { userID } = req.params;
+    if (!userID) {
+        return res.status(400).json({ message: 'User ID is required' });
+    }
+    try {
+        const { getClient } = require('./services/clientService');
+        let clientEntry = getClient(userID);
+        let qrTimeout;
+        let responded = false;
+        // Helper to clean up listeners and timeout
+        const cleanup = () => {
+            if (clientEntry) clientEntry.process.off('message', onQR);
+            clearTimeout(qrTimeout);
+        };
+        // QR event handler
+        const onQR = (msg) => {
+            if (msg.type === 'qr' && !responded) {
+                responded = true;
+                cleanup();
+                res.json({ qr: msg.qr });
+            }
+        };
+        // If client exists and is active, return immediately
+        if (clientEntry && clientEntry.isActive) {
+            return res.json({ message: 'Client is already active' });
+        }
+        // If client exists and is initializing, listen for QR
+        if (clientEntry && clientEntry.isInitializing) {
+            clientEntry.process.on('message', onQR);
+            qrTimeout = setTimeout(() => {
+                if (!responded) {
+                    responded = true;
+                    cleanup();
+                    res.status(504).json({ message: 'QR code not received in time' });
+                }
+            }, 15000);
+            return;
+        }
+        // If client does not exist, set up listener after initializing
+        await initializeClient(userID);
+        clientEntry = getClient(userID);
+        if (!clientEntry) {
+            return res.status(404).json({ message: 'Client not found' });
+        }
+        clientEntry.process.on('message', onQR);
+        qrTimeout = setTimeout(() => {
+            if (!responded) {
+                responded = true;
+                cleanup();
+                res.status(504).json({ message: 'QR code not received in time' });
+            }
+        }, 15000);
+    } catch (error) {
+        res.status(500).json({ message: 'Failed to get QR code', error: error.message });
+    }
+});
+
+// Add SSE endpoint for live QR updates
+app.get('/qr-updates/:userID', async (req, res) => {
+    const { userID } = req.params;
+    if (!userID) {
+        return res.status(400).json({ message: 'User ID is required' });
+    }
+
+    // Set headers for SSE
+    res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive'
+    });
+
+    // Send initial connection message
+    res.write('data: ' + JSON.stringify({ status: 'connecting' }) + '\n\n');
+
+    // Create QR event handler
+    const onQR = (msg) => {
+        if (msg.type === 'qr' && msg.clientId === userID) {
+            res.write('data: ' + JSON.stringify({ qr: msg.qr }) + '\n\n');
+        } else if (msg.type === 'ready' && msg.clientId === userID) {
+            res.write('data: ' + JSON.stringify({ message: 'Client is ready' }) + '\n\n');
+        } else if (msg.type === 'disconnected' && msg.clientId === userID) {
+            res.write('data: ' + JSON.stringify({ message: 'Client disconnected' }) + '\n\n');
+        } else if (msg.type === 'error' && msg.clientId === userID) {
+            res.write('data: ' + JSON.stringify({ error: msg.error }) + '\n\n');
+        }
+    };
+
+    // Get client entry
+    const { getClient, initializeClient } = require('./services/clientService');
+    let clientEntry = getClient(userID);
+    
+    try {
+        // Initialize client if it doesn't exist
+        if (!clientEntry) {
+            await initializeClient(userID);
+            clientEntry = getClient(userID);
+            if (!clientEntry) {
+                throw new Error('Failed to initialize client');
+            }
+        }
+
+        // Attach event listener
+        clientEntry.process.on('message', onQR);
+
+        // Handle client disconnect
+        req.on('close', () => {
+            if (clientEntry) {
+                clientEntry.process.off('message', onQR);
+            }
+        });
+    } catch (error) {
+        res.write('data: ' + JSON.stringify({ error: error.message }) + '\n\n');
+    }
+});
+
+// Serve the admin page (with user ID input)
+app.get('/indexar', (req, res) => {
+  res.sendFile(path.join(VIEWS_DIR, 'indexar.html'));
+});
+
+// Serve the user-specific QR page
+app.get('/user/:userID([0-9]+)', (req, res) => {
+    res.sendFile(path.join(VIEWS_DIR, 'user-qr.html'));
+});
+
+app.use((err, req, res, next) => {
+    logServerEvent('error', err.message);
+    console.error('Unhandled Error:', err);
+    res.st.atus(500).send('Internal Server Error');
+});
+
+process.on('SIGINT', async () => {
+    logServerEvent('info', 'Graceful shutdown initiated');
+    try {
+        await terminateAllClientsService();
+        logServerEvent('info', 'All clients terminated successfully');
+        process.exit(0);
+    } catch (error) {
+        logServerEvent('error', `Error during shutdown: ${error.message}`);
+        process.exit(1);
+    }
+});
+
+app.listen(PORT, () => {
+    logServerEvent('info', `Server is running on http://localhost:${PORT}`);
+    console.log(`Server is running on http://localhost:${PORT}`);
+});
+]]>
+</file>
+<file name="Whatsapp_web\src\services\clientProcess.js">
+<![CDATA[
+const path = require('path');
+const fs = require('fs');
+const qrcode = require('qrcode-terminal');
+const puppeteer = require('puppeteer');
+const { DATA_AUTH, LOGGER_DIR, MEDIA_DIR } = require('../config/paths');
+const { Client, LocalAuth } = require('whatsapp-web.js');
+
+
+const { logClientEvent, logMessageStatus } = require(path.join(LOGGER_DIR, 'logUtils.js'));
+const { createMessageMedia } = require(path.join(MEDIA_DIR, 'mediaUtils.js'));
+
+
+
+  // Log startup
+  logClientEvent(process.argv[2], 'info', 'Client process starting');
+
+  const clientId = process.argv[2];
+
+  const client = new Client({
+      authStrategy: new LocalAuth({ clientId: `client-${clientId}`, 
+      dataPath: DATA_AUTH
+      }),
+      puppeteer: {
+          executablePath: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",  // Explicitly use Google Chrome
+          headless: true,
+          defaultViewport: null,
+          args: [
+              '--no-sandbox',
+              '--disable-setuid-sandbox',
+              '--disable-dev-shm-usage',
+              '--disable-accelerated-2d-canvas',
+              '--no-first-run',
+              '--start-maximized',
+              '--disable-gpu',
+              '--display=:1',  // Using display :1 since we set up VNC on this display
+              '--disable-notifications',
+              '--disable-extensions',
+              '--disable-default-apps',
+              '--enable-features=NetworkService',
+              '--allow-running-insecure-content',
+              '--ignore-certificate-errors'
+          ]
+      }
+  });
+
+  // Enhanced event logging
+  client.on('qr', (qr) => {
+      logClientEvent(clientId, 'info', 'QR Code generated');
+      qrcode.generate(qr, { small: true });
+      console.log(`QR code generated for client ${clientId}, scan it with your phone.`);
+      if (process.send) {
+          process.send({ type: 'qr', clientId, qr });
+          logClientEvent(clientId, 'debug', 'QR Code sent to parent process');
+      }
+  });
+
+  client.on('ready', () => {
+      logClientEvent(clientId, 'info', 'Client is ready and authenticated');
+      console.log(`Client ${clientId} is ready!`);
+      process.send({ type: 'ready', clientId });
+  });
+
+  client.on('disconnected', (reason) => {
+      logClientEvent(clientId, 'warn', `Client disconnected: ${reason}`);
+      onsole.log(`Client ${clientId} is disconnected.`);
+      process.send({ type: 'disconnected', clientId });
+  });
+
+  client.on('auth_failure', (msg) => {
+      logClientEvent(clientId, 'error', `Authentication failed: ${msg}`);
+      console.error(`Authentication failure for client ${clientId}:`, msg);
+      process.send({ type: 'auth_failure', clientId, error: msg });
+  });
+
+  client.on('error', (error) => {
+      logClientEvent(clientId, 'error', `Client error occurred: ${error.message}`);
+      process.send({ type: 'error', clientId, error: error.message });
+  });
+
+  // Enhanced message handling
+  process.on('message', async (msg) => {
+      if (!msg || typeof msg.type !== 'string') {
+          logClientEvent(clientId, 'error', 'Invalid message received');
+          return;
+      }
+
+      logClientEvent(clientId, 'debug', `Received message from parent: ${msg.type}`);
+
+      switch (msg.type) {
+          case 'terminate':
+              logClientEvent(clientId, 'info', 'Termination requested');
+              try {
+                  await client.destroy();
+                  logClientEvent(clientId, 'info', 'Client destroyed successfully');
+                  process.send({ type: 'terminated', clientId });
+                  process.exit(0);
+              } catch (error) {
+                  logClientEvent(clientId, 'error', `Termination failed: ${error.message}`);
+                  process.send({ type: 'terminate_error', clientId, error: error.message });
+              }
+              break;
+
+          case 'send_message':
+              const { phoneNumber, message, mediaPath, userId, leadID } = msg;
+              logClientEvent(clientId, 'info', `Message send requested to ${phoneNumber}`);
+
+              if (!phoneNumber || !userId) {
+                  logClientEvent(clientId, 'error', `Invalid message parameters for ${phoneNumber}`);
+                  logMessageStatus(userId, phoneNumber, 'failed', leadID, 'Missing phoneNumber or userId');
+                  process.send({ type: 'message_error', clientId, phoneNumber, error: 'Missing phoneNumber or userId' });
+                  return;
+              }
+
+              try {
+                  let sentMessage;
+                  if (mediaPath) {
+                      logClientEvent(clientId, 'debug', `Creating media message from ${mediaPath}`);
+                      const { media, caption } = await createMessageMedia(mediaPath, message);
+                      if (!media) {
+                          throw new Error('Media creation failed');
+                      }
+                      sentMessage = await client.sendMessage(phoneNumber, media, { caption });
+                      logClientEvent(clientId, 'debug', 'Media message sent successfully');
+                  } else {
+                      sentMessage = await client.sendMessage(phoneNumber, message);
+                      logClientEvent(clientId, 'debug', 'Text message sent successfully');
+                  }
+                  
+                  logMessageStatus(userId, phoneNumber, 'sent', leadID);
+                  logClientEvent(clientId, 'info', `Message sent successfully to ${phoneNumber}`);
+                  process.send({ type: 'message_sent', clientId, phoneNumber });
+              } catch (error) {
+                  logClientEvent(clientId, 'error', `Failed to send message to ${phoneNumber}: ${error.message}`);
+                  logMessageStatus(userId, phoneNumber, 'failed', leadID, error.message);
+                  process.send({ type: 'message_error', clientId, phoneNumber, error: error.message });
+              }
+              break;
+
+          default:
+              logClientEvent(clientId, 'warn', `Unknown message type received: ${msg.type}`);
+      }
+  });
+
+  // Log uncaught exceptions
+  process.on('uncaughtException', (error) => {
+      logClientEvent(clientId, 'error', `Uncaught exception: ${error.message}`);
+  });
+
+  // Log unhandled rejections
+  process.on('unhandledRejection', (reason, promise) => {
+      logClientEvent(clientId, 'error', `Unhandled rejection: ${reason?.message || reason}`);
+  });
+
+  // Initialize client with error handling
+  client.initialize().catch(error => {
+      logClientEvent(clientId, 'error', `Client initialization failed: ${error.message}`);
+      process.send({ type: 'init_error', clientId, error: error.message });
+  });
+]]>
+</file>
+<file name="Whatsapp_web\src\services\clientService.js">
+<![CDATA[
+const path = require('path');
+const { fork } = require('child_process');
+const { SERVICES_DIR, LOGGER_DIR } = require('../config/paths');
+
+const { logClientEvent } = require(path.join(LOGGER_DIR, 'logUtils'));
+
+
+const clients = {};
+
+const initializeClient = (clientId) => {
+    return new Promise((resolve, reject) => {
+        if (clients[clientId]?.isActive) {
+            console.log(`Client ${clientId} is already active.`);
+            return resolve();
+        }
+
+        if (clients[clientId]?.isInitializing) {
+            console.log(`Client ${clientId} is already being initialized.`);
+            return reject(new Error('Client is already being initialized'));
+        }
+
+        const clientProcess = fork(path.join(SERVICES_DIR, 'clientProcess.js'), [clientId]);
+
+        clients[clientId] = {
+            process: clientProcess,
+            isActive: false,
+            isDestroying: false,
+            isInitializing: true,
+            campaignQueue: [],
+            isProcessingQueue: false
+        };
+
+        clientProcess.on('message', (msg) => {
+            if (!msg || typeof msg.type !== 'string') return;
+
+            switch (msg.type) {
+                case 'ready':
+                    clients[clientId].isActive = true;
+                    clients[clientId].isInitializing = false;
+                    logClientEvent(clientId, 'info', 'Client is ready');
+                    break;
+                case 'disconnected':
+                    clients[clientId].isActive = false;
+                    logClientEvent(clientId, 'warn', 'Client is disconnected');
+                    break;
+                case 'auth_failure':
+                    clients[clientId].isActive = false;
+                    clients[clientId].isInitializing = false;
+                    logClientEvent(clientId, 'error', `Authentication failure: ${msg.error}`);
+                    break;
+                case 'error':
+                    clients[clientId].isActive = false;
+                    clients[clientId].isInitializing = false;
+                    logClientEvent(clientId, 'error', `Error: ${msg.error}`);
+                    break;
+                case 'terminated':
+                    clients[clientId].isActive = false;
+                    clients[clientId].isDestroying = false;
+                    delete clients[clientId];
+                    logClientEvent(clientId, 'info', 'Client terminated and cleaned up');
+                    break;
+                case 'qr':
+                case 'message_sent': 
+                    break;   
+                default:
+                    logClientEvent(clientId, 'warn', `Unknown message type: ${msg.type}`);
+            }
+        });
+
+        clientProcess.on('exit', (code, signal) => {
+            clients[clientId].isActive = false;
+            clients[clientId].isInitializing = false;
+            delete clients[clientId];
+            logClientEvent(clientId, 'info', `Client process exited with code ${code}, signal ${signal}`);
+        });
+
+        clientProcess.on('error', (error) => {
+            clients[clientId].isActive = false;
+            clients[clientId].isInitializing = false;
+            logClientEvent(clientId, 'error', `Client process error: ${error.message}`);
+            reject(error);
+        });
+
+        resolve();
+    });
+};
+
+const terminateClient = (clientId) => {
+    const clientEntry = clients[clientId];
+
+    if (!clientEntry) {
+        console.log(`Client ${clientId} does not exist.`);
+        logClientEvent(clientId, 'warn', 'Client does not exist');
+        return;
+    }
+
+    if (clientEntry.isDestroying) {
+        console.log(`Client ${clientId} is already being terminated.`);
+        logClientEvent(clientId, 'info', 'Client termination already in progress');
+        return;
+    }
+
+    clientEntry.isDestroying = true;
+    clientEntry.process.send({ type: 'terminate' });
+
+    clientEntry.process.once('message', (msg) => {
+        if (msg.type === 'terminated') {
+            delete clients[clientId];
+            logClientEvent(clientId, 'info', 'Client terminated and cleaned up');
+        }
+    });
+};
+
+const terminateAllClientsService = async () => {
+    const allClients = getAllClients();
+    if (Object.keys(allClients).length === 0) return;
+
+    const { default: pLimit } = await import('p-limit');
+    const limit = pLimit(5);
+    const terminationPromises = Object.keys(allClients).map(id => 
+        limit(() => terminateClient(id))
+    );
+
+    await Promise.all(terminationPromises);
+};
+
+const getClient = (clientId) => clients[clientId];
+const getAllClients = () => clients;
+
+module.exports = {
+    initializeClient,
+    getClient,
+    getAllClients,
+    terminateClient,
+    terminateAllClientsService
+};
+
+
+]]>
+</file>
+<file name="Whatsapp_web\src\utils\logger\logUtils.js">
+<![CDATA[
+const fs = require('fs');
+const path = require('path');
+
+// Ensure the existence of a directory synchronously
+const ensureDirectoryExists = (directoryPath) => {
+    if (!fs.existsSync(directoryPath)) {
+        fs.mkdirSync(directoryPath, { recursive: true });
+    }
+};
+
+// Generate the log file path based on the agent's ID and the current date
+const getLogFileName = (userId, logType = 'default') => {
+    if (typeof userId !== 'string' && typeof userId !== 'number') {
+        throw new TypeError('userId must be a string or number');
+    }
+
+    const date = new Date();
+    const dateString = `${(date.getMonth() + 1).toString().padStart(2, '0')}_${date.getDate().toString().padStart(2, '0')}_${date.getFullYear()}`;
+
+    let baseLogDirectory;
+    let finalLogDirectory;
+
+    if (userId === 'server') {
+        baseLogDirectory = path.join(__dirname, '../../../logs/server');
+        finalLogDirectory = baseLogDirectory; // Server logs are directly in logs/server
+    } else {
+        baseLogDirectory = path.join(__dirname, '../../../logs/clients');
+        finalLogDirectory = path.join(baseLogDirectory, userId.toString()); // Client logs are in logs/clients/clientId/
+    }
+    
+    ensureDirectoryExists(finalLogDirectory);
+
+    const fileName = `${dateString}_${logType}.log`;
+    return path.join(finalLogDirectory, fileName);
+};
+
+// Log the message status, phone number, status, error, and timestamp
+const logMessageStatus = (userId, phoneNumber, status, leadID, error = '') => {
+    if (!userId) {
+        throw new TypeError('userId is required');
+    }
+
+    const logFilePath = getLogFileName(userId, 'message');
+    const cleanPhoneNumber = phoneNumber ? phoneNumber.replace('@c.us', '') : 'unknown';
+    const date = new Date();
+
+    const dateString = `${(date.getMonth() + 1).toString().padStart(2, '0')}/${date.getDate().toString().padStart(2, '0')}/${date.getFullYear()}`;
+    const timeString = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+    let logLine = `${leadID || 'unknown'};${cleanPhoneNumber};${status};${dateString};${timeString}`;
+    if (error.includes('invalid wid')) {
+        logLine += " - WhatsApp account not found";
+    } else if (error) {
+        logLine += ` - Error detail: ${error}`;
+    }
+    logLine += `\n`;
+
+    try {
+        fs.appendFileSync(logFilePath, logLine, 'utf8');
+    } catch (err) {
+        console.error(`Failed to write log to ${logFilePath}:`, err);
+    }
+};
+
+// Log server events
+const logServerEvent = (level, message) => {
+    const logFilePath = getLogFileName('server', 'events');
+    const date = new Date();
+    const timeString = date.toISOString();
+
+    const logLine = `[${timeString}] [${level.toUpperCase()}] - ${message}\n`;
+    try {
+        fs.appendFileSync(logFilePath, logLine, 'utf8');
+    } catch (err) {
+        console.error(`Failed to write server event log to ${logFilePath}:`, err);
+    }
+};
+
+// Log client-specific events
+const logClientEvent = (clientId, level, message) => {
+    const logFilePath = getLogFileName(clientId, 'client');
+    const date = new Date();
+    const timeString = date.toISOString();
+
+    const logLine = `[${timeString}] [${level.toUpperCase()}] - ${message}\n`;
+    try {
+        fs.appendFileSync(logFilePath, logLine, 'utf8');
+    } catch (err) {
+        console.error(`Failed to write client event log to ${logFilePath}:`, err);
+    }
+};
+
+module.exports = {
+    logMessageStatus,
+    logServerEvent,
+    logClientEvent
+};
+
+]]>
+</file>
+<file name="Whatsapp_web\src\utils\media\mediaUtils.js">
+<![CDATA[
+// utils/mediaUtils.js
+const mime = require('mime-types');
+const fs = require('fs').promises;
+const path = require('path');
+const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
+const { MessageMedia } = require('whatsapp-web.js');
+
+const MAX_MEDIA_SIZE = 10 * 1024 * 1024; // 10MB
+
+const extractMediaPath = (message) => {
+    const mediaPathRegex = /(\b[A-Za-z]:\\[^ ]+\b)/g;
+    const mediaPaths = message.match(mediaPathRegex);
+    const cleanMessage = message.replace(mediaPathRegex, '').trim();
+    return {
+        mediaPath: mediaPaths ? mediaPaths[0] : null,
+        cleanMessage
+    };
+};
+
+const createMessageMedia = async (mediaPath, message) => {
+    try {
+        let media;
+        let mediaBuffer;
+        let mediaType = mime.lookup(mediaPath) || 'application/octet-stream';
+
+        if (mediaPath.startsWith('http://') || mediaPath.startsWith('https://')) {
+            const response = await fetch(mediaPath);
+            if (!response.ok) {
+                throw new Error(`Failed to fetch media from URL: ${response.statusText}`);
+            }
+
+            mediaBuffer = Buffer.from(await response.arrayBuffer());
+        } else {
+            const absolutePath = path.resolve(mediaPath);
+            console.log(`Resolving media path: ${absolutePath}`); // Added logging
+            mediaBuffer = await fs.readFile(absolutePath);
+            console.log(`Successfully read media file: ${absolutePath}`); // Added logging
+        }
+
+        if (mediaBuffer.length > MAX_MEDIA_SIZE) {
+            throw new Error('Media file size exceeds the maximum allowed limit of 10MB');
+        }
+
+        media = new MessageMedia(mediaType, mediaBuffer.toString('base64'), path.basename(mediaPath));
+        return { media, caption: message };
+    } catch (error) {
+        console.error(`Error in createMessageMedia: ${error.message}`); // Added logging
+        throw new Error(`Failed to create media: ${error.message}`);
+    }
+};
+
+module.exports = {
+    extractMediaPath,
+    createMessageMedia
+};
+
+]]>
+</file>
+<file name="Whatsapp_web\src\config\paths.js">
+<![CDATA[
+const path = require('path');
+
+// project root: two folders up from /src/config
+const ROOT = path.resolve(__dirname, '..', '..');
+
+module.exports = {
+  ROOT,
+  DATA_AUTH : path.join(ROOT, 'data', '.wwebjs_auth'),
+  DATA_CACHE: path.join(ROOT, 'data', '.wwebjs_cache'),
+  PUBLIC_DIR: path.join(ROOT, 'public'),
+  VIEWS_DIR : path.join(ROOT, 'public', 'views'),
+  LOGS_DIR  : path.join(ROOT, 'logs'),
+  LOGS_SERVER_DIR : path.join(ROOT, 'logs', 'server'),
+  LOGS_CLIENTS_DIR: path.join(ROOT, 'logs', 'clients'),
+  SERVICES_DIR : path.join(ROOT, 'src', 'services'),
+  CONTROLLERS_DIR : path.join(ROOT, 'src', 'controllers'),
+  LOGGER_DIR : path.join(ROOT, 'src', 'utils', 'logger'),
+  MEDIA_DIR : path.join(ROOT, 'src', 'utils', 'media'),
+  CONFIG_DIR : path.join(ROOT, 'src', 'config') 
+};
+
+]]>
+</file>
+</files>

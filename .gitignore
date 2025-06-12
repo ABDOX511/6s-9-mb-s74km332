@@ -1,0 +1,53 @@
+# Dependencies
+node_modules/
+vendor/
+__pycache__/
+
+# Build outputs
+dist/
+build/
+out/
+target/
+coverage/
+
+# Version control
+.git/
+
+# Environment and config
+.env*
+config/secrets/
+
+# IDE files
+.vscode/
+.idea/
+
+# Temporary files
+tmp/
+temp/
+
+# Log files
+*.log
+*.log.gz
+*.log.xz
+*.log.bz2
+*.log.lzma
+*.log.lz4
+
+# Data files
+#*.json
+#*.json.gz
+#*.json.xz
+#*.json.bz2
+#*.json.lzma
+#*.json.lz4
+
+*.csv
+*.csv.gz
+*.csv.xz
+*.csv.bz2
+*.csv.lzma
+*.csv.lz4
+
+# WhatsApp Web.js cache
+.wwebjs_auth/
+.wwebjs_cache/
