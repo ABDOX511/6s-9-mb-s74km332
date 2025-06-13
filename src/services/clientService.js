@@ -26,8 +26,6 @@ const initializeClient = (clientId) => {
             isActive: false,
             isDestroying: false,
             isInitializing: true,
-            campaignQueue: [],
-            isProcessingQueue: false
         };
 
         clientProcess.on('message', (msg) => {

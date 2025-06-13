@@ -3,15 +3,13 @@ const {
   SERVICES_DIR,
   MEDIA_DIR,
   LOGGER_DIR,
-  CONFIG_DIR
 } = require('../config/paths');
 
 const { getClient } = require(path.join(SERVICES_DIR, 'clientService'));
 const { extractMediaPath, createMessageMedia } = require(path.join(MEDIA_DIR, 'mediaUtils'));
 const { logMessageStatus } = require(path.join(LOGGER_DIR, 'logUtils'));
-const { getConfig } = require(path.join(CONFIG_DIR, 'configLoader'));
 const wrap = require('../middlewares/asyncWrapper');
-
+const redis = require('../config/redisClient'); // Import Redis client
 
 // Function to send a message to a client
 const sendMessageToClient = (clientProcess, phoneNumber, message, mediaPath, userId, leadID) => {
@@ -39,54 +37,6 @@ const sendMessageToClient = (clientProcess, phoneNumber, message, mediaPath, use
     });
 };
 
-// Function to process the campaign queue with proper delays
-const processCampaignQueue = async (clientId) => {
-    const clientEntry = getClient(clientId);
-    if (!clientEntry || clientEntry.isProcessingQueue || clientEntry.campaignQueue.length === 0) return;
-
-    clientEntry.isProcessingQueue = true;
-    const { campaignQueue, process: clientProcess } = clientEntry;
-    const config = getConfig(); // Call getConfig once
-    const { MESSAGE_DELAY_MIN, MESSAGE_DELAY_MAX, REST_DELAY_MIN, REST_DELAY_MAX } = config;
-
-    let messageCount = 0;
-
-    while (campaignQueue.length > 0) {
-        const messageData = campaignQueue.shift();
-        try {
-            await sendMessageToClient(
-                clientProcess,
-                messageData.phoneNumber,
-                messageData.message,
-                messageData.mediaPath,
-                clientId,
-                messageData.leadID // Ensure leadID is included
-            );
-        } catch (error) {
-            // console.error(`Error processing campaign queue for ${messageData.phoneNumber}:`, error); // Removed redundant console.error
-        }
-
-        messageCount++;
-        // Determine the delay based on message count
-        const delay = getDelay(messageCount, config); // Use the cached config
-        
-        // Pause processing for the calculated delay
-        await delayExecution(delay);
-    }
-
-    clientEntry.isProcessingQueue = false;
-};
-
-// Utility functions for delay calculation and execution
-const getDelay = (messageCount, config) => {
-  const { REST_DELAY_MIN, REST_DELAY_MAX, MESSAGE_DELAY_MIN, MESSAGE_DELAY_MAX, MESSAGE_LIMIT_BEFORE_DELAY } = config;
-  return (messageCount % MESSAGE_LIMIT_BEFORE_DELAY === 0) // Use the new configurable limit
-      ? Math.random() * (REST_DELAY_MAX - REST_DELAY_MIN) + REST_DELAY_MIN
-      : Math.random() * (MESSAGE_DELAY_MAX - MESSAGE_DELAY_MIN) + MESSAGE_DELAY_MIN;
-};
-
-const delayExecution = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
 // Function to handle incoming send message requests
 exports.sendMessage = wrap(async (req, res) => {
     const requestData = req.body.request;
@@ -110,9 +60,10 @@ exports.sendMessage = wrap(async (req, res) => {
         return res.status(400).json({ message: 'Message text or media path is missing' });
     }
 
+    // Client must exist and be active to add to queue or send immediately
     const clientEntry = getClient(clientID);
     if (!clientEntry || !clientEntry.isActive) {
-        return res.status(400).json({ message: 'Failed to send message', status: 'undelivered' });
+        return res.status(400).json({ message: 'Failed to send message: Client not active or initialized', status: 'undelivered' });
     }
 
     let finalMediaPath = mediaPath;
@@ -125,11 +76,12 @@ exports.sendMessage = wrap(async (req, res) => {
         message = extracted.cleanMessage;
     }
 
-    // If the request is from the 'sender' module, add it to the campaign queue
+    // If the request is from the 'sender' module, add it to the campaign queue in Redis
     if (requestData.module_id === 'sender') {
-        clientEntry.campaignQueue.push({ phoneNumber, message, mediaPath: finalMediaPath, leadID });
-        processCampaignQueue(clientID);
-        return res.json({ message: 'Message added to campaign queue' });
+        const messageData = { phoneNumber, message, mediaPath: finalMediaPath, userId: clientID, leadID };
+        const queueKey = `whatsapp:queue:${clientID}`;
+        await redis.rpush(queueKey, JSON.stringify(messageData));
+        return res.json({ message: 'Message added to campaign queue in Redis' });
     }
 
     // Otherwise, send the message immediately
