@@ -24,7 +24,7 @@ exports.addClient = wrap(async (req, res) => {
 
 // POST /api/clients/terminate/:id
 exports.terminateClient = wrap(async (req, res) => {
-  const { clientId } = req.body;
+  const { id: clientId } = req.params;
   if (!clientId) {
       return res.status(400).json({ message: 'Client ID is required' });
   }
@@ -81,7 +81,6 @@ exports.getQrCode = wrap(async (req, res) => {
     if (!userID) {
         return res.status(400).json({ message: 'User ID is required' });
     }
-    const { getClient, initializeClient } = require(path.join(SERVICES_DIR, 'clientService'));
     let clientEntry = getClient(userID);
     let qrTimeout;
     let responded = false;
@@ -160,7 +159,6 @@ exports.streamQrUpdates = wrap(async (req, res) => {
     };
 
     // Get client entry
-    const { getClient, initializeClient } = require(path.join(SERVICES_DIR, 'clientService'));
     let clientEntry = getClient(userID);
     
     // Initialize client if it doesn't exist

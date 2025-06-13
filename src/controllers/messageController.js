@@ -63,7 +63,7 @@ const processCampaignQueue = async (clientId) => {
                 messageData.leadID // Ensure leadID is included
             );
         } catch (error) {
-            console.error(`Error processing campaign queue for ${messageData.phoneNumber}:`, error);
+            // console.error(`Error processing campaign queue for ${messageData.phoneNumber}:`, error); // Removed redundant console.error
         }
 
         messageCount++;

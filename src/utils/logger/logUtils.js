@@ -1,17 +1,23 @@
-const fs = require('fs');
+const fs = require('fs').promises;
 const path = require('path');
 
 const { LOGS_SERVER_DIR, LOGS_CLIENTS_DIR } = require('../../config/paths');
 
 // Ensure the existence of a directory synchronously
-const ensureDirectoryExists = (directoryPath) => {
-    if (!fs.existsSync(directoryPath)) {
-        fs.mkdirSync(directoryPath, { recursive: true });
+const ensureDirectoryExists = async (directoryPath) => {
+    try {
+        await fs.access(directoryPath);
+    } catch (error) {
+        if (error.code === 'ENOENT') {
+            await fs.mkdir(directoryPath, { recursive: true });
+        } else {
+            throw error; // Re-throw other errors
+        }
     }
 };
 
 // Generate the log file path based on the agent's ID and the current date
-const getLogFileName = (userId, logType = 'default') => {
+const getLogFileName = async (userId, logType = 'default') => {
     if (typeof userId !== 'string' && typeof userId !== 'number') {
         throw new TypeError('userId must be a string or number');
     }
@@ -30,19 +36,19 @@ const getLogFileName = (userId, logType = 'default') => {
         finalLogDirectory = path.join(baseLogDirectory, userId.toString()); // Client logs are in logs/clients/clientId/
     }
     
-    ensureDirectoryExists(finalLogDirectory);
+    await ensureDirectoryExists(finalLogDirectory);
 
     const fileName = `${dateString}_${logType}.log`;
     return path.join(finalLogDirectory, fileName);
 };
 
 // Log the message status, phone number, status, error, and timestamp
-const logMessageStatus = (userId, phoneNumber, status, leadID, error = '') => {
+const logMessageStatus = async (userId, phoneNumber, status, leadID, error = '') => {
     if (!userId) {
         throw new TypeError('userId is required');
     }
 
-    const logFilePath = getLogFileName(userId, 'message');
+    const logFilePath = await getLogFileName(userId, 'message');
     const cleanPhoneNumber = phoneNumber ? phoneNumber.replace('@c.us', '') : 'unknown';
     const date = new Date();
 
@@ -57,39 +63,39 @@ const logMessageStatus = (userId, phoneNumber, status, leadID, error = '') => {
     }
     logLine += `\n`;
 
-    fs.appendFile(logFilePath, logLine, 'utf8', (err) => {
-        if (err) {
-            console.error(`Failed to write log to ${logFilePath}:`, err);
-        }
-    });
+    try {
+        await fs.appendFile(logFilePath, logLine, 'utf8');
+    } catch (err) {
+        console.error(`Failed to write log to ${logFilePath}:`, err);
+    }
 };
 
 // Log server events
-const logServerEvent = (level, message) => {
-    const logFilePath = getLogFileName('server', 'events');
+const logServerEvent = async (level, message) => {
+    const logFilePath = await getLogFileName('server', 'events');
     const date = new Date();
     const timeString = date.toISOString();
 
     const logLine = `[${timeString}] [${level.toUpperCase()}] - ${message}\n`;
-    fs.appendFile(logFilePath, logLine, 'utf8', (err) => {
-        if (err) {
-            console.error(`Failed to write server event log to ${logFilePath}:`, err);
-        }
-    });
+    try {
+        await fs.appendFile(logFilePath, logLine, 'utf8');
+    } catch (err) {
+        console.error(`Failed to write server event log to ${logFilePath}:`, err);
+    }
 };
 
 // Log client-specific events
-const logClientEvent = (clientId, level, message) => {
-    const logFilePath = getLogFileName(clientId, 'client');
+const logClientEvent = async (clientId, level, message) => {
+    const logFilePath = await getLogFileName(clientId, 'client');
     const date = new Date();
     const timeString = date.toISOString();
 
     const logLine = `[${timeString}] [${level.toUpperCase()}] - ${message}\n`;
-    fs.appendFile(logFilePath, logLine, 'utf8', (err) => {
-        if (err) {
-            console.error(`Failed to write client event log to ${logFilePath}:`, err);
-        }
-    });
+    try {
+        await fs.appendFile(logFilePath, logLine, 'utf8');
+    } catch (err) {
+        console.error(`Failed to write client event log to ${logFilePath}:`, err);
+    }
 };
 
 module.exports = {
