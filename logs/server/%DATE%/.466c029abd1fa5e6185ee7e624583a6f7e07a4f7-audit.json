@@ -1,0 +1,15 @@
+{
+    "keep": {
+        "days": true,
+        "amount": 14
+    },
+    "auditLog": "H:\\dev\\Whatsapp\\Whatsapp_web\\logs\\server\\%DATE%\\.466c029abd1fa5e6185ee7e624583a6f7e07a4f7-audit.json",
+    "files": [
+        {
+            "date": 1749775258863,
+            "name": "H:\\dev\\Whatsapp\\Whatsapp_web\\logs\\server\\2025-06-13\\rejections.log",
+            "hash": "9d27d2829777e0588dd6ff0c12785e2cd3a11facffc21848ed33905ce87f53d4"
+        }
+    ],
+    "hashType": "sha256"
+}
