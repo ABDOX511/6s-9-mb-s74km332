@@ -1,0 +1,34 @@
+version: '3.8' # Specify the Docker Compose file format version
+
+services:
+  # Service for your Node.js application
+  app:
+    build: . # Build the image from the Dockerfile in the current directory
+    ports:
+      - "3000:3000" # Map host port 3000 to container port 3000
+    environment: # Pass environment variables to the app container
+      PORT: 3000
+      REDIS_HOST: redis # This matches the service name of the Redis container
+      REDIS_PORT: 6379
+      # Add any other environment variables your application needs (e.g., specific API keys)
+    volumes:
+      # Map the data and logs directories to host machine for persistence
+      - ./data:/app/data
+      - ./logs:/app/logs
+      # Optional: if you need to access specific local media files for testing
+      # - ./path/to/your/local/media:/app/media # Uncomment and adjust if needed
+    depends_on:
+      - redis # Ensure Redis starts before the app
+
+  # Service for the Redis server
+  redis:
+    image: "redis:7-alpine" # Use a lightweight Redis image
+    ports:
+      - "6379:6379" # Map host port 6379 to container port 6379
+    volumes:
+      # Persist Redis data to avoid losing it if the container is removed
+      - redis_data:/data # Named volume for Redis data persistence
+
+# Define named volumes for data persistence
+volumes:
+  redis_data: # This volume will store Redis data

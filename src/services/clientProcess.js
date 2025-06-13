@@ -90,7 +90,6 @@ const processRedisQueue = async (clientId) => {
       dataPath: DATA_AUTH
       }),
       puppeteer: {
-          executablePath: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",  // Explicitly use Google Chrome
           headless: true,
           defaultViewport: null,
           args: [
