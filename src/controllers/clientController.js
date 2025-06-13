@@ -1,5 +1,5 @@
 const path = require('path');
-const { SERVICES_DIR, LOGGER_DIR } = require('../config/paths');
+const { SERVICES_DIR, UTILS_DIR } = require('../config/paths');
 const wrap = require('../middlewares/asyncWrapper');
 
 const {
@@ -10,7 +10,7 @@ const {
   initializeClient
 } = require(path.join(SERVICES_DIR, 'clientService'));
 
-const { logClientEvent } = require(path.join(LOGGER_DIR, 'logUtils'));
+const { logClientEvent } = require(path.join(UTILS_DIR, 'logUtils'));
 
 // POST /api/clients/add
 exports.addClient = wrap(async (req, res) => {

@@ -1,8 +1,8 @@
 const path = require('path');
 const { fork } = require('child_process');
-const { SERVICES_DIR, LOGGER_DIR } = require('../config/paths');
+const { SERVICES_DIR, UTILS_DIR } = require('../config/paths');
 
-const { logClientEvent } = require(path.join(LOGGER_DIR, 'logUtils'));
+const { logClientEvent } = require(path.join(UTILS_DIR, 'logUtils'));
 
 
 const clients = {};

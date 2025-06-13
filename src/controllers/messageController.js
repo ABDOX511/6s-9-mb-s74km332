@@ -1,13 +1,12 @@
 const path = require('path');
 const {
   SERVICES_DIR,
-  MEDIA_DIR,
-  LOGGER_DIR,
+  UTILS_DIR,
 } = require('../config/paths');
 
 const { getClient } = require(path.join(SERVICES_DIR, 'clientService'));
-const { extractMediaPath, createMessageMedia } = require(path.join(MEDIA_DIR, 'mediaUtils'));
-const { logMessageStatus } = require(path.join(LOGGER_DIR, 'logUtils'));
+const { extractMediaPath, createMessageMedia } = require(path.join(UTILS_DIR, 'mediaUtils'));
+const { logMessageStatus } = require(path.join(UTILS_DIR, 'logUtils'));
 const wrap = require('../middlewares/asyncWrapper');
 const redis = require('../config/redisClient'); // Import Redis client
 

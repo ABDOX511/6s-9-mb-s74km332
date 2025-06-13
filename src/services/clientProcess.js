@@ -2,13 +2,13 @@ const path = require('path');
 const fs = require('fs');
 const qrcode = require('qrcode-terminal');
 const puppeteer = require('puppeteer');
-const { DATA_AUTH, LOGGER_DIR, MEDIA_DIR, CONFIG_DIR } = require('../config/paths');
+const { DATA_AUTH, UTILS_DIR, CONFIG_DIR } = require('../config/paths');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const redis = require('../config/redisClient'); // Import Redis client
-const { getConfig } = require(path.join(CONFIG_DIR, 'configLoader')); // Import config for delays
+const { getConfig } = require('../utils/configManager'); // Import config for delays
 
-const { logClientEvent, logMessageStatus } = require(path.join(LOGGER_DIR, 'logUtils.js'));
-const { createMessageMedia } = require(path.join(MEDIA_DIR, 'mediaUtils.js'));
+const { logClientEvent, logMessageStatus } = require(path.join(UTILS_DIR, 'logUtils.js'));
+const { createMessageMedia } = require(path.join(UTILS_DIR, 'mediaUtils.js'));
 
 // Utility functions for delay calculation and execution (re-introduced for this worker process)
 const getDelay = (messageCount, config) => {
@@ -50,11 +50,11 @@ const sendMessageToClient = (clientProcess, phoneNumber, message, mediaPath, use
 const processRedisQueue = async (clientId) => {
     logClientEvent(clientId, 'info', 'Starting Redis queue consumer');
     const queueKey = `whatsapp:queue:${clientId}`;
-    const config = getConfig(); // Load config for delays
 
     let messageCount = 0;
 
     while (true) { // Infinite loop to continuously process messages
+        const config = getConfig(); // Load config for delays for each iteration
         try {
             // BLPOP blocks until an element is available or timeout (0 for indefinite block)
             const [listName, messageDataString] = await redis.blpop(queueKey, 0);

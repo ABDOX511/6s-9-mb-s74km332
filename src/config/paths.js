@@ -14,8 +14,7 @@ module.exports = {
   LOGS_CLIENTS_DIR : path.join(ROOT, 'logs', 'clients'),
   SERVICES_DIR : path.join(ROOT, 'src', 'services'),
   CONTROLLERS_DIR : path.join(ROOT, 'src', 'controllers'),
-  LOGGER_DIR : path.join(ROOT, 'src', 'utils', 'logger'),
-  MEDIA_DIR : path.join(ROOT, 'src', 'utils', 'media'),
+  UTILS_DIR : path.join(ROOT, 'src', 'utils'),
   CONFIG_DIR : path.join(ROOT, 'src', 'config'),
   ROUTES_DIR : path.join(ROOT, 'src', 'routes')
 };

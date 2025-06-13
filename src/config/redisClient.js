@@ -1,5 +1,5 @@
 const Redis = require('ioredis');
-const { logServerEvent } = require('../utils/logger/logUtils');
+const { logServerEvent } = require('../utils/logUtils');
 
 const REDIS_HOST = process.env.REDIS_HOST || '127.0.0.1'; // Your WSL IP
 const REDIS_PORT = process.env.REDIS_PORT ? parseInt(process.env.REDIS_PORT, 10) : 6379;

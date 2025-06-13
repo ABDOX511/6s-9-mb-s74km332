@@ -1,8 +1,8 @@
 const path = require('path');
 const winston = require('winston');
 const DailyRotateFile = require('winston-daily-rotate-file');
-const serverLogger = require('../../config/winstonLogger'); // Import the pre-configured server logger
-const { LOGS_CLIENTS_DIR } = require('../../config/paths'); // Import client logs directory
+const serverLogger = require('../config/winstonLogger'); // Import the pre-configured server logger
+const { LOGS_CLIENTS_DIR } = require('../config/paths'); // Import client logs directory
 
 const clientLoggers = {}; // Cache for client-specific loggers
 
