@@ -51,3 +51,4 @@ temp/
 # WhatsApp Web.js cache
 .wwebjs_auth/
 .wwebjs_cache/
+logs/
