@@ -34,12 +34,12 @@ temp/
 *.log.lz4
 
 # Data files
-#*.json
-#*.json.gz
-#*.json.xz
-#*.json.bz2
-#*.json.lzma
-#*.json.lz4
+*.json
+*.json.gz
+*.json.xz
+*.json.bz2
+*.json.lzma
+*.json.lz4
 
 *.csv
 *.csv.gz
