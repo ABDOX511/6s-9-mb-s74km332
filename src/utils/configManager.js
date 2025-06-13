@@ -16,6 +16,7 @@ let redisSubscriber; // Dedicated subscriber client for Pub/Sub
 const loadConfigFromRedis = async () => {
     try {
         const configData = await redisClient.hgetall(CONFIG_REDIS_KEY);
+
         if (Object.keys(configData).length === 0) {
             logServerEvent('info', 'No existing configuration found in Redis. Populating with defaults.');
             // Populate Redis with default values if empty
@@ -28,7 +29,6 @@ const loadConfigFromRedis = async () => {
                 loadedConfig[key] = parseInt(configData[key], 10);
             }
             currentConfig = { ...defaultDelays, ...loadedConfig }; // Merge with defaults to ensure all keys exist
-            logServerEvent('info', 'Configuration loaded from Redis.');
         }
     } catch (error) {
         logServerEvent('error', `Failed to load configuration from Redis: ${error.message}. Using default values.`);

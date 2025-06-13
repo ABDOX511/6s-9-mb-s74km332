@@ -26,12 +26,12 @@ tmp/
 temp/
 
 # Log files
-*.log
-*.log.gz
-*.log.xz
-*.log.bz2
-*.log.lzma
-*.log.lz4
+# *.log
+# *.log.gz
+# *.log.xz
+# *.log.bz2
+# *.log.lzma
+# *.log.lz4
 
 # Data files
 #*.json
@@ -51,5 +51,5 @@ temp/
 # WhatsApp Web.js cache
 .wwebjs_auth/
 .wwebjs_cache/
-logs/
+# logs/
 docs/

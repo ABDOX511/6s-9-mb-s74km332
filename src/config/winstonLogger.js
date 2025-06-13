@@ -34,7 +34,8 @@ const transports = [
                 }
                 return log;
             })
-        )
+        ),
+        level: 'info' // Revert to info for console output
     }),
     // Combined server logs for all levels, organized by date folder
     new DailyRotateFile({
@@ -43,7 +44,7 @@ const transports = [
         zippedArchive: true,
         maxSize: '20m',
         maxFiles: '14d',
-        level: 'info' // Log info and above to combined file
+        level: 'info' // Revert to info for combined file
     }),
     // Error specific server logs, organized by date folder
     new DailyRotateFile({

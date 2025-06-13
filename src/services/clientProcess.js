@@ -57,7 +57,7 @@ const processRedisQueue = async (clientId) => {
         const config = getConfig(); // Load config for delays for each iteration
         try {
             // BLPOP blocks until an element is available or timeout (0 for indefinite block)
-            const [listName, messageDataString] = await redis.blpop(queueKey, 0);
+            const [listName, messageDataString] = await redis.blpop(queueKey, 5); // Set a 5-second timeout
 
             if (messageDataString) {
                 const messageData = JSON.parse(messageDataString);
