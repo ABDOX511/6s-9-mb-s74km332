@@ -52,3 +52,4 @@ temp/
 .wwebjs_auth/
 .wwebjs_cache/
 logs/
+docs/
