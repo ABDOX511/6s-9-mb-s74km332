@@ -25,7 +25,6 @@ app.get('/user/:userID([0-9]+)', (req, res) => {
 
 app.use((err, req, res, next) => {
     logServerEvent('error', err.message);
-    console.error('Unhandled Error:', err);
     res.status(500).send('Internal Server Error');
 });
 

@@ -62,7 +62,7 @@ const { createMessageMedia } = require(path.join(MEDIA_DIR, 'mediaUtils.js'));
 
   client.on('disconnected', (reason) => {
       logClientEvent(clientId, 'warn', `Client disconnected: ${reason}`);
-      onsole.log(`Client ${clientId} is disconnected.`);
+      console.log(`Client ${clientId} is disconnected.`);
       process.send({ type: 'disconnected', clientId });
   });
 
@@ -127,7 +127,6 @@ const { createMessageMedia } = require(path.join(MEDIA_DIR, 'mediaUtils.js'));
                   }
                   
                   logMessageStatus(userId, phoneNumber, 'sent', leadID);
-                  logClientEvent(clientId, 'info', `Message sent successfully to ${phoneNumber}`);
                   process.send({ type: 'message_sent', clientId, phoneNumber });
               } catch (error) {
                   logClientEvent(clientId, 'error', `Failed to send message to ${phoneNumber}: ${error.message}`);
@@ -139,16 +138,6 @@ const { createMessageMedia } = require(path.join(MEDIA_DIR, 'mediaUtils.js'));
           default:
               logClientEvent(clientId, 'warn', `Unknown message type received: ${msg.type}`);
       }
-  });
-
-  // Log uncaught exceptions
-  process.on('uncaughtException', (error) => {
-      logClientEvent(clientId, 'error', `Uncaught exception: ${error.message}`);
-  });
-
-  // Log unhandled rejections
-  process.on('unhandledRejection', (reason, promise) => {
-      logClientEvent(clientId, 'error', `Unhandled rejection: ${reason?.message || reason}`);
   });
 
   // Initialize client with error handling
