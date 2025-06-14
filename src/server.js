@@ -24,21 +24,30 @@ app.get('/user/:userID([0-9]+)', (req, res) => {
 });
 
 app.use((err, req, res, next) => {
-    logServerEvent('error', err.message);
+    logServerEvent('error', err.message, { stack: err.stack });
+    if (res.headersSent) {
+        // If headers have already been sent, delegate to the default Express error handler
+        // which will close the connection if it hasn't already.
+        return next(err);
+    }
     res.status(500).send('Internal Server Error');
 });
 
-process.on('SIGINT', async () => {
-    logServerEvent('info', 'Graceful shutdown initiated');
+const gracefulShutdown = async (signal) => {
+    logServerEvent('info', `Received ${signal}. Graceful shutdown initiated.`);
     try {
         await terminateAllClientsService();
-        logServerEvent('info', 'All clients terminated successfully');
+        logServerEvent('info', 'All clients terminated successfully.');
         process.exit(0);
     } catch (error) {
-        logServerEvent('error', `Error during shutdown: ${error.message}`);
+        logServerEvent('error', `Error during graceful shutdown: ${error.message}`);
         process.exit(1);
     }
-});
+};
+
+// Listen for termination signals
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
 app.listen(PORT, () => {
     logServerEvent('info', `Server is running on http://localhost:${PORT}`);

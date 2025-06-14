@@ -18,8 +18,12 @@ exports.addClient = wrap(async (req, res) => {
     if (!clientId) {
         return res.status(400).json({ message: 'Client ID is required' });
     }
-    await initializeClient(clientId);
-    res.json({ message: 'Client initialized successfully' });
+    // No longer awaiting. Initialization will happen in the background.
+    initializeClient(clientId).catch(err => {
+        // Log the error but don't block the response. The user will see status via other means.
+        logClientEvent(clientId, 'error', `Background initialization failed: ${err.message}`);
+    });
+    res.status(202).json({ message: `Client ${clientId} initialization process started.` });
 });
 
 // POST /api/clients/terminate/:id
@@ -81,52 +85,37 @@ exports.getQrCode = wrap(async (req, res) => {
     if (!userID) {
         return res.status(400).json({ message: 'User ID is required' });
     }
+
     let clientEntry = getClient(userID);
-    let qrTimeout;
-    let responded = false;
-    // Helper to clean up listeners and timeout
-    const cleanup = () => {
-        if (clientEntry) clientEntry.process.off('message', onQR);
-        clearTimeout(qrTimeout);
-    };
-    // QR event handler
-    const onQR = (msg) => {
-        if (msg.type === 'qr' && !responded) {
-            responded = true;
-            cleanup();
-            res.json({ qr: msg.qr });
-        }
-    };
-    // If client exists and is active, return immediately
+
     if (clientEntry && clientEntry.isActive) {
         return res.json({ message: 'Client is already active' });
     }
-    // If client exists and is initializing, listen for QR
-    if (clientEntry && clientEntry.isInitializing) {
-        clientEntry.process.on('message', onQR);
-        qrTimeout = setTimeout(() => {
-            if (!responded) {
-                responded = true;
-                cleanup();
-                res.status(504).json({ message: 'QR code not received in time' });
+
+    try {
+        // If client doesn't exist or isn't initializing, start it.
+        if (!clientEntry || !clientEntry.isInitializing) {
+            // Start initialization but don't wait for it to complete here
+            initializeClient(userID).catch(err => {
+                // The promise rejection is handled by the caller of initializeClient,
+                // but we log it here for visibility during the QR flow.
+                logClientEvent(userID, 'error', `Background initialization failed: ${err.message}`);
+            });
+            // Re-fetch clientEntry to get the updated object with qrPromise
+            clientEntry = getClient(userID);
+            if (!clientEntry) {
+                // This case should ideally not happen if initializeClient successfully forks a process
+                return res.status(500).json({ message: `Failed to initialize client process for ${userID}.` });
             }
-        }, 15000);
-        return;
-    }
-    // If client does not exist, set up listener after initializing
-    await initializeClient(userID);
-    clientEntry = getClient(userID);
-    if (!clientEntry) {
-        return res.status(404).json({ message: 'Client not found' });
-    }
-    clientEntry.process.on('message', onQR);
-    qrTimeout = setTimeout(() => {
-        if (!responded) {
-            responded = true;
-            cleanup();
-            res.status(504).json({ message: 'QR code not received in time' });
         }
-    }, 15000);
+        
+        // Wait specifically for the QR code from the clientEntry's promise
+        const qr = await clientEntry.qrPromise;
+        res.json({ qr });
+
+    } catch (error) {
+        res.status(500).json({ message: `Failed to get QR code for client ${userID}: ${error.message}` });
+    }
 });
 
 exports.streamQrUpdates = wrap(async (req, res) => {
@@ -145,7 +134,26 @@ exports.streamQrUpdates = wrap(async (req, res) => {
     // Send initial connection message
     res.write('data: ' + JSON.stringify({ status: 'connecting' }) + '\n\n');
 
-    // Create QR event handler
+    // Helper to wait for client entry and its process
+    const waitForClientEntryAndProcess = (userId) => {
+        return new Promise((resolve, reject) => {
+            const interval = setInterval(() => {
+                const entry = getClient(userId);
+                if (entry && entry.process) {
+                    clearInterval(interval);
+                    clearTimeout(timeout);
+                    resolve(entry);
+                }
+            }, 200); // Check every 200ms
+
+            const timeout = setTimeout(() => {
+                clearInterval(interval);
+                reject(new Error('Timed out waiting for client process.'));
+            }, 15000); // 15-second timeout
+        });
+    };
+
+    // Create QR event handler (using clientEntry from closure)
     const onQR = (msg) => {
         if (msg.type === 'qr' && msg.clientId === userID) {
             res.write('data: ' + JSON.stringify({ qr: msg.qr }) + '\n\n');
@@ -155,28 +163,56 @@ exports.streamQrUpdates = wrap(async (req, res) => {
             res.write('data: ' + JSON.stringify({ message: 'Client disconnected' }) + '\n\n');
         } else if (msg.type === 'error' && msg.clientId === userID) {
             res.write('data: ' + JSON.stringify({ error: msg.error }) + '\n\n');
+        } else if (msg.type === 'auth_failure' && msg.clientId === userID) {
+            res.write('data: ' + JSON.stringify({ error: `Authentication failed: ${msg.error}` }) + '\n\n');
+        } else if (msg.type === 'init_error' && msg.clientId === userID) {
+            res.write('data: ' + JSON.stringify({ error: `Initialization failed: ${msg.error}` }) + '\n\n');
         }
     };
 
-    // Get client entry
-    let clientEntry = getClient(userID);
-    
-    // Initialize client if it doesn't exist
-    if (!clientEntry) {
-        await initializeClient(userID);
-        clientEntry = getClient(userID);
-        if (!clientEntry) {
-            throw new Error('Failed to initialize client');
+    try {
+        // Start initialization in the background, don't await here.
+        initializeClient(userID).catch(err => {
+            // Log this error but don't stop the SSE stream
+            logClientEvent(userID, 'error', `Background SSE client initialization failed: ${err.message}`);
+        });
+
+        // Wait for the client entry and process to be available
+        const clientEntry = await waitForClientEntryAndProcess(userID);
+
+        // Attach event listener immediately
+        clientEntry.process.on('message', onQR);
+
+        // Check if QR is already available or if the client is already active
+        if (clientEntry.qrPromise) {
+            // Use Promise.race to handle both resolution and rejection of qrPromise
+            Promise.race([
+                clientEntry.qrPromise.then(qr => { 
+                    if (qr) res.write('data: ' + JSON.stringify({ qr: qr }) + '\n\n');
+                }),
+                clientEntry.initializationPromise.catch(err => {
+                    // If initializationPromise rejects (e.g., auth_failure from background)
+                    res.write('data: ' + JSON.stringify({ error: `Initialization failed: ${err.message}` }) + '\n\n');
+                })
+            ]).catch(err => {
+                // Catch any uncaught errors from the race
+                logClientEvent(userID, 'error', `Error in qrPromise race for SSE: ${err.message}`);
+            });
+        } else if (clientEntry.isActive) {
+            res.write('data: ' + JSON.stringify({ message: 'Client is already active' }) + '\n\n');
         }
+
+        // Handle client disconnect (browser closing connection)
+        req.on('close', () => {
+            logClientEvent(userID, 'info', 'SSE connection closed by client.');
+            if (clientEntry) {
+                clientEntry.process.off('message', onQR);
+            }
+        });
+
+    } catch (error) {
+        logClientEvent(userID, 'error', `SSE stream error for client ${userID}: ${error.message}`);
+        res.write('data: ' + JSON.stringify({ error: error.message || 'Failed to start QR stream' }) + '\n\n');
+        res.end(); // End the stream on critical error
     }
-
-    // Attach event listener
-    clientEntry.process.on('message', onQR);
-
-    // Handle client disconnect
-    req.on('close', () => {
-        if (clientEntry) {
-            clientEntry.process.off('message', onQR);
-        }
-    });
 });

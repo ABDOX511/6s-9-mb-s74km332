@@ -19,6 +19,13 @@ services:
       # - ./path/to/your/local/media:/app/media # Uncomment and adjust if needed
     depends_on:
       - redis # Ensure Redis starts before the app
+      - mongo # Ensure Mongo starts before the app
+    stop_grace_period: 45s # Allow 45s for graceful shutdown
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0' # Limit to 4 CPU cores - Adjusted for VPS
+          memory: 8G # Limit to 8 GB of RAM - Adjusted for VPS
 
   # Service for the Redis server
   redis:
@@ -29,6 +36,15 @@ services:
       # Persist Redis data to avoid losing it if the container is removed
       - redis_data:/data # Named volume for Redis data persistence
 
+  # Service for the MongoDB server
+  mongo:
+    image: mongo:5
+    ports:
+      - "27017:27017" # Map host port 27017 to container port 27017
+    volumes:
+      - mongo_data:/data/db
+
 # Define named volumes for data persistence
 volumes:
   redis_data: # This volume will store Redis data
+  mongo_data: # This volume will store MongoDB data

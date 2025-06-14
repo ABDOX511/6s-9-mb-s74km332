@@ -72,7 +72,7 @@
 
             try {
                 // Set up SSE for live updates
-                eventSource = new EventSource(`/api/clients/qr/${encodeURIComponent(userID)}`);
+                eventSource = new EventSource(`/api/clients/qr-updates/${encodeURIComponent(userID)}`);
                 
                 eventSource.onmessage = (event) => {
                     const data = JSON.parse(event.data);
