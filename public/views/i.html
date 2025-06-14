@@ -307,9 +307,8 @@
                     } else if (data.message) {
                         hideSpinner();
                         cleanupEventSource();
-                        if (data.message === 'Client is ready' || data.message === 'Client already connected') {
+                        if (data.message === 'Client is ready') {
                             showSuccess();
-                            showStatus(data.message, 'success');
                         } else {
                             showStatus(data.message, 'info');
                         }

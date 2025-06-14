@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>WhatsApp QR Code Login</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body { font-family: Arial, sans-serif; background: #f4f4f4; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+        .container { background: #fff; padding: 2rem 3rem; border-radius: 12px; box-shadow: 0 2px 16px rgba(0,0,0,0.08); text-align: center; }
+        #qr { margin: 1.5rem 0; }
+        #status { color: #888; margin-top: 1rem; }
+        input { padding: 0.5rem; border-radius: 6px; border: 1px solid #ccc; margin-right: 0.5rem; }
+        button { padding: 0.5rem 1.2rem; border-radius: 6px; border: none; background: #25d366; color: #fff; font-weight: bold; cursor: pointer; }
+        button:disabled { background: #b2f5c0; }
+        .spinner { border: 3px solid #f3f3f3; border-top: 3px solid #25d366; border-radius: 50%; width: 20px; height: 20px; animation: spin 1s linear infinite; margin: 10px auto; display: none; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>WhatsApp QR Code Login</h2>
+        <form id="qrForm">
+            <input type="text" id="userID" placeholder="Enter User ID" required />
+            <button type="submit">Get QR Code</button>
+        </form>
+        <div class="spinner" id="spinner"></div>
+        <div id="qr"></div>
+        <div id="status"></div>
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <script>
+        const form = document.getElementById('qrForm');
+        const qrDiv = document.getElementById('qr');
+        const statusDiv = document.getElementById('status');
+        const spinner = document.getElementById('spinner');
+        const submitButton = form.querySelector('button');
+        
+        let qrcode = null;
+        let eventSource = null;
+
+        function showSpinner() {
+            spinner.style.display = 'block';
+            submitButton.disabled = true;
+        }
+
+        function hideSpinner() {
+            spinner.style.display = 'none';
+            submitButton.disabled = false;
+        }
+
+        function updateQRCode(qrData) {
+            qrDiv.innerHTML = ''; // Clear previous QR code
+            qrcode = new QRCode(qrDiv, {
+                text: qrData,
+                width: 256,
+                height: 256,
+                colorDark: "#000000",
+                colorLight: "#ffffff",
+                correctLevel: QRCode.CorrectLevel.H
+            });
+        }
+
+        function cleanupEventSource() {
+            if (eventSource) {
+                eventSource.close();
+                eventSource = null;
+            }
+        }
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            qrDiv.innerHTML = '';
+            statusDiv.textContent = 'Initializing WhatsApp...';
+            const userID = document.getElementById('userID').value.trim();
+            if (!userID) return;
+
+            showSpinner();
+            cleanupEventSource();
+
+            try {
+                // Set up SSE for live updates
+                eventSource = new EventSource(`/api/clients/qr-updates/${encodeURIComponent(userID)}`);
+                
+                eventSource.onmessage = (event) => {   
+                    const data = JSON.parse(event.data);
+                    console.log('Received SSE data:', data); // Debug log
+                    
+                    if (data.status === 'connecting') {
+                        statusDiv.textContent = 'Connecting to WhatsApp...';
+                    } else if (data.qr) {
+                        hideSpinner();
+                        statusDiv.textContent = 'Scan this QR code with your WhatsApp app';
+                        updateQRCode(data.qr);
+                    } else if (data.message) {
+                        if (data.message === 'Client is ready') {
+                            statusDiv.textContent = 'WhatsApp Connected!';
+                            hideSpinner();
+                            cleanupEventSource();
+                            qrDiv.innerHTML = '✅ Successfully connected!';
+                        } else if (data.message === 'Client already connected') {
+                            statusDiv.textContent = 'Client already connected';
+                            hideSpinner();
+                            cleanupEventSource();
+                        } else if (data.message === 'Client disconnected') {
+                            statusDiv.textContent = 'WhatsApp disconnected. Please try again.';
+                            hideSpinner();
+                            cleanupEventSource();
+                        } else {
+                            statusDiv.textContent = data.message;
+                        }
+                    } else if (data.error) {
+                        statusDiv.textContent = 'Error: ' + data.error;
+                        hideSpinner();
+                        cleanupEventSource();
+                    }
+                };
+
+                eventSource.onerror = (error) => {
+                    console.error('SSE Error:', error); // Debug log
+                    statusDiv.textContent = 'Connection lost. Please try again.';
+                    hideSpinner();
+                    cleanupEventSource();
+                };
+
+            } catch (err) {
+                console.error('Error:', err); // Debug log
+                statusDiv.textContent = 'Error: ' + (err.message || 'Failed to establish connection');
+                hideSpinner();
+            }
+        });
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', cleanupEventSource);
+    </script>
+</body>
+</html>

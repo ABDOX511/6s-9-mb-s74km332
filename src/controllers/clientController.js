@@ -103,6 +103,14 @@ exports.streamQrUpdates = async (req, res) => {
     // Send initial connection message
     res.write('data: ' + JSON.stringify({ status: 'connecting' }) + '\n\n');
 
+    // Check if client is already active/ready before proceeding with initialization
+    const existingClient = getClient(userID);
+    if (existingClient && (existingClient.isActive || existingClient.isReady)) {
+        logClientEvent(userID, 'info', `SSE stream requested for client ${userID}, but client is already active/ready. Not re-initializing.`);
+        res.write('data: ' + JSON.stringify({ message: 'Client already connected' }) + '\n\n');
+        return res.end();
+    }
+
     // Helper to wait for client entry and its process
     const waitForClientEntryAndProcess = (userId) => {
         return new Promise((resolve, reject) => {
