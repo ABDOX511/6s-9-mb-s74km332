@@ -74,6 +74,9 @@ const processRedisQueue = async (clientId, client) => {
                 messageCount++;
                 const delay = getDelay(messageCount, config);
                 await delayExecution(delay);
+            } else {
+                // If no message in queue, wait a bit before checking again to avoid tight loop
+                await delayExecution(1000); // Small delay to avoid busy-waiting
             }
         } catch (error) {
             logClientEvent(clientId, 'error', `Error processing Redis queue for ${clientId}: ${error.message}`);
@@ -131,6 +134,7 @@ const processRedisQueue = async (clientId, client) => {
         client.on('qr', (qr) => {
             logClientEvent(clientId, 'info', 'QR Code generated');
             qrcode.generate(qr, { small: true });
+            console.log(`Scan QR code for client: ${clientId}`); 
             if (process.send) {
                 logClientEvent(clientId, 'debug', 'Sending QR event to parent process.');
                 process.send({ type: 'qr', clientId, qr });
@@ -139,6 +143,7 @@ const processRedisQueue = async (clientId, client) => {
 
         client.on('ready', () => {
             logClientEvent(clientId, 'info', 'Client is ready and authenticated');
+            console.log(`Client ${clientId} is ready!`); 
             if (process.send) {
                 logClientEvent(clientId, 'debug', 'Sending READY event to parent process.');
                 process.send({ type: 'ready', clientId });
@@ -204,6 +209,7 @@ const processRedisQueue = async (clientId, client) => {
                     }
                     if (process.send) process.send({ type: 'immediate_message_sent', leadID: msg.leadID });
                 } catch (error) {
+                    logMessageStatus(userId, phoneNumber, 'failed', leadID, error.message); 
                     logClientEvent(clientId, 'error', `Failed to send immediate message: ${error.message}`);
                     if (process.send) process.send({ type: 'immediate_message_error', leadID: msg.leadID, error: error.message });
                 }
