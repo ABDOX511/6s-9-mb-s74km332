@@ -3,6 +3,7 @@ const { fork } = require('child_process');
 const { SERVICES_DIR, UTILS_DIR } = require('../config/paths');
 
 const { logClientEvent } = require(path.join(UTILS_DIR, 'logUtils'));
+const { setClientState, deleteClientState } = require('./clientStateService');
 
 
 const clients = {};
@@ -10,33 +11,26 @@ const clients = {};
 const initializeClient = (clientId) => {
     return new Promise((resolve, reject) => {
         if (clients[clientId]?.isActive) {
-            console.log(`Client ${clientId} is already active.`);
+            logClientEvent(clientId, 'info', `Client ${clientId} is already active.`);
             return resolve();
         }
 
         // If client is already initializing, return the existing promise
         if (clients[clientId]?.isInitializing && clients[clientId]?.initializationPromise) {
-            console.log(`Client ${clientId} is already being initialized. Returning existing promise.`);
+            logClientEvent(clientId, 'info', `Client ${clientId} is already being initialized. Returning existing promise.`);
             return clients[clientId].initializationPromise;
         }
 
-        // Timeout for the promise, but DON'T kill the process.
-        // This allows the user to take their time scanning the QR code without the backend crashing.
-        const promiseTimeout = setTimeout(() => {
-            // Only log a warning if it's still initializing. Do NOT reject the promise here.
-            // The promise should have been resolved by 'qr' or 'ready' events if successful.
-            if (clients[clientId]?.isInitializing) {
-                 logClientEvent(clientId, 'warn', `Initialization promise timed out for client ${clientId}. The process is still running in the background, but the promise was not resolved by 'qr' or 'ready' events in time.`);
-            }
-        }, 90000); // 90-second timeout for the promise.
-
         if (clients[clientId]?.isInitializing) {
-            console.log(`Client ${clientId} is already being initialized.`);
-            clearTimeout(promiseTimeout);
             return reject(new Error('Client is already being initialized'));
         }
 
         const clientProcess = fork(path.join(SERVICES_DIR, 'clientProcess.js'), [clientId]);
+
+        // Persist initial state to Redis
+        setClientState(clientId, { clientId, pid: clientProcess.pid, status: 'initializing' }).catch(err => {
+            logClientEvent(clientId, 'error', `Failed to set initial state in Redis: ${err.message}`);
+        });
 
         let resolveQrPromise; // For the QR code specifically
         let rejectQrPromise;
@@ -70,9 +64,9 @@ const initializeClient = (clientId) => {
                 case 'ready':
                     clients[clientId].isReady = true;
                     logClientEvent(clientId, 'info', 'Client is ready, awaiting session save.');
+                    setClientState(clientId, { status: 'ready' });
                     // Resolve the main initialization promise early if the client is ready and still initializing
                     if (clients[clientId]?.isInitializing) {
-                        clearTimeout(promiseTimeout);
                         clients[clientId].isInitializing = false;
                         resolveInitializationPromise();
                     }
@@ -81,18 +75,19 @@ const initializeClient = (clientId) => {
                     clients[clientId].isActive = true;
                     clients[clientId].isInitializing = false;
                     logClientEvent(clientId, 'info', 'Client session saved and is now fully active.');
-                    clearTimeout(promiseTimeout);
+                    setClientState(clientId, { status: 'active' });
                     resolveInitializationPromise(); // Resolve the main initialization promise here
                     break;
                 case 'disconnected':
                     clients[clientId].isActive = false;
                     logClientEvent(clientId, 'warn', 'Client is disconnected');
+                    setClientState(clientId, { status: 'disconnected' });
                     break;
                 case 'auth_failure':
                     clients[clientId].isActive = false;
                     clients[clientId].isInitializing = false;
                     logClientEvent(clientId, 'error', `Authentication failure: ${msg.error}`);
-                    clearTimeout(promiseTimeout);
+                    deleteClientState(clientId); // Clean up Redis state on failure
                     rejectInitializationPromise(new Error(`Authentication failure: ${msg.error}`));
                     // Also reject the QR promise if it hasn't been resolved yet
                     rejectQrPromise(new Error(`Authentication failed before QR for ${clientId}: ${msg.error}`));
@@ -104,7 +99,7 @@ const initializeClient = (clientId) => {
                 case 'init_error': // Specific error for initialization failures
                     clients[clientId].isInitializing = false;
                     logClientEvent(clientId, 'error', `Initialization Error: ${msg.error}`);
-                    clearTimeout(promiseTimeout);
+                    deleteClientState(clientId); // Clean up Redis state on failure
                     rejectInitializationPromise(new Error(`Initialization failed: ${msg.error}`));
                     // Also reject the QR promise if it hasn't been resolved yet
                     rejectQrPromise(new Error(`Initialization failed before QR for ${clientId}: ${msg.error}`));
@@ -113,15 +108,16 @@ const initializeClient = (clientId) => {
                     clients[clientId].isActive = false;
                     clients[clientId].isDestroying = false;
                     delete clients[clientId];
+                    deleteClientState(clientId); // Clean up Redis state
                     logClientEvent(clientId, 'info', 'Client terminated and cleaned up');
                     break;
                 case 'qr':
                     // Resolve the main initialization promise early if QR is received and still initializing
                     if (clients[clientId]?.isInitializing) {
-                        clearTimeout(promiseTimeout);
                         clients[clientId].isInitializing = false;
                         resolveInitializationPromise();
                     }
+                    setClientState(clientId, { status: 'qr_ready' });
                     resolveQrPromise(msg.qr);
                     break;
                 case 'message_sent':
@@ -135,9 +131,9 @@ const initializeClient = (clientId) => {
             if (clients[clientId]) {
                 const wasInitializing = clients[clientId].isInitializing;
                 delete clients[clientId];
+                deleteClientState(clientId); // Clean up Redis state
                 logClientEvent(clientId, 'info', `Client process exited with code ${code}, signal ${signal}`);
                 if (wasInitializing) {
-                    clearTimeout(promiseTimeout);
                     rejectInitializationPromise(new Error(`Client process exited unexpectedly during initialization.`));
                 }
             }
@@ -147,7 +143,7 @@ const initializeClient = (clientId) => {
             if (clients[clientId]) {
                 clients[clientId].isInitializing = false;
                 logClientEvent(clientId, 'error', `Client process error: ${error.message}`);
-                clearTimeout(promiseTimeout);
+                deleteClientState(clientId); // Clean up Redis state
                 rejectInitializationPromise(error);
             }
         });
@@ -172,11 +168,13 @@ const terminateClient = (clientId) => {
 
         clientEntry.isDestroying = true;
         logClientEvent(clientId, 'info', `Sending terminate signal to client ${clientId}`);
+        setClientState(clientId, { status: 'terminating' }); // Update state in Redis
         clientEntry.process.send({ type: 'terminate' });
 
         const terminationTimeout = setTimeout(() => {
             logClientEvent(clientId, 'error', 'Client termination timed out.');
             delete clients[clientId];
+            deleteClientState(clientId); // Final cleanup
             reject(new Error(`Termination timed out for client ${clientId}`));
         }, 30000); // 30-second timeout
 
@@ -184,6 +182,7 @@ const terminateClient = (clientId) => {
             if (msg.type === 'terminated') {
                 clearTimeout(terminationTimeout);
                 delete clients[clientId];
+                deleteClientState(clientId); // Final cleanup
                 logClientEvent(clientId, 'info', 'Client terminated and cleaned up successfully');
                 resolve();
             }
@@ -193,6 +192,7 @@ const terminateClient = (clientId) => {
         clientEntry.process.once('exit', () => {
             clearTimeout(terminationTimeout);
             delete clients[clientId];
+            deleteClientState(clientId); // Final cleanup
             logClientEvent(clientId, 'warn', `Client process for ${clientId} exited unexpectedly during termination.`);
             resolve(); // Resolve to not block the shutdown process
         });

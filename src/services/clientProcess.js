@@ -22,32 +22,6 @@ const getDelay = (messageCount, config) => {
 
 const delayExecution = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Function to send a message to a client (same as before)
-const sendMessageToClient = (clientProcess, phoneNumber, message, mediaPath, userId, leadID) => {
-    return new Promise((resolve, reject) => {
-        const messageHandler = (msg) => {
-            if (msg.type === 'message_sent' && msg.phoneNumber === phoneNumber) {
-                resolve();
-                clientProcess.off('message', messageHandler); // Remove listener
-            } else if (msg.type === 'message_error' && msg.phoneNumber === phoneNumber) {
-                reject(new Error(msg.error));
-                clientProcess.off('message', messageHandler); // Remove listener
-            }
-        };
-
-        clientProcess.on('message', messageHandler);
-
-        // Extract media path if not provided directly (can be optimized if `createMessageMedia` handles it)
-        if (!mediaPath) {
-            const extracted = extractMediaPath(message);
-            mediaPath = extracted.mediaPath;
-            message = extracted.cleanMessage;
-        }
-
-        clientProcess.send({ type: 'send_message', phoneNumber, message, mediaPath, userId, leadID });
-    });
-};
-
 // Main function to process messages from Redis queue
 const processRedisQueue = async (clientId, client) => {
     logClientEvent(clientId, 'info', 'Starting Redis queue consumer');
@@ -200,7 +174,7 @@ const processRedisQueue = async (clientId, client) => {
             } else if (msg.type === 'send_immediate_message') {
                 logClientEvent(clientId, 'info', `Received immediate message request for ${msg.phoneNumber}`);
                 try {
-                    const { phoneNumber, message, mediaPath } = msg;
+                    const { phoneNumber, message, mediaPath, userId, leadID } = msg;
                     if (mediaPath) {
                         const { media, caption } = await createMessageMedia(mediaPath, message);
                         await client.sendMessage(phoneNumber, media, { caption });
@@ -209,7 +183,7 @@ const processRedisQueue = async (clientId, client) => {
                     }
                     if (process.send) process.send({ type: 'immediate_message_sent', leadID: msg.leadID });
                 } catch (error) {
-                    logMessageStatus(userId, phoneNumber, 'failed', leadID, error.message); 
+                    logMessageStatus(msg.userId, msg.phoneNumber, 'failed', msg.leadID, error.message); 
                     logClientEvent(clientId, 'error', `Failed to send immediate message: ${error.message}`);
                     if (process.send) process.send({ type: 'immediate_message_error', leadID: msg.leadID, error: error.message });
                 }

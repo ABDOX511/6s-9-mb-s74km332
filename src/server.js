@@ -2,20 +2,21 @@ require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
 const path = require('path');
-const {VIEWS_DIR, UTILS_DIR} = require('./config/paths');
+const {VIEWS_DIR, UTILS_DIR, PUBLIC_DIR} = require('./config/paths');
 const { terminateAllClientsService } = require('./services/clientService');
+const { cleanupOrphanedClients } = require('./services/clientStateService');
 const { logServerEvent } = require(path.join(UTILS_DIR, 'logUtils'));
 const routes = require('./routes');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-
+app.use(express.static(PUBLIC_DIR));
 app.use(bodyParser.json());
 app.use('/api', routes);
 
 // Serve the admin page (with user ID input)
 app.get('/indexar', (req, res) => {
-  res.sendFile(`${VIEWS_DIR}/indexar.html`);
+  res.sendFile(path.join(VIEWS_DIR, 'indexar.html'));
 });
 
 // Serve the user-specific QR page
@@ -49,7 +50,11 @@ const gracefulShutdown = async (signal) => {
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
-app.listen(PORT, () => {
-    logServerEvent('info', `Server is running on http://localhost:${PORT}`);
-    console.log(`Server is running on http://localhost:${PORT}`);
-});
+// Perform cleanup and start the server
+(async () => {
+    await cleanupOrphanedClients();
+    app.listen(PORT, () => {
+        logServerEvent('info', `Server is running on http://localhost:${PORT}`);
+        console.log(`Server is running on http://localhost:${PORT}`);
+    });
+})();

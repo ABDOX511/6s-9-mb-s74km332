@@ -1,7 +1,5 @@
 const path = require('path');
 const { SERVICES_DIR, UTILS_DIR } = require('../config/paths');
-const wrap = require('../middlewares/asyncWrapper');
-
 const {
   getClient,
   terminateClient,
@@ -13,7 +11,7 @@ const {
 const { logClientEvent } = require(path.join(UTILS_DIR, 'logUtils'));
 
 // POST /api/clients/add
-exports.addClient = wrap(async (req, res) => {
+exports.addClient = async (req, res) => {
     const { clientId } = req.body;
     if (!clientId) {
         return res.status(400).json({ message: 'Client ID is required' });
@@ -24,10 +22,10 @@ exports.addClient = wrap(async (req, res) => {
         logClientEvent(clientId, 'error', `Background initialization failed: ${err.message}`);
     });
     res.status(202).json({ message: `Client ${clientId} initialization process started.` });
-});
+};
 
 // POST /api/clients/terminate/:id
-exports.terminateClient = wrap(async (req, res) => {
+exports.terminateClient = async (req, res) => {
   const { id: clientId } = req.params;
   if (!clientId) {
       return res.status(400).json({ message: 'Client ID is required' });
@@ -35,90 +33,61 @@ exports.terminateClient = wrap(async (req, res) => {
 
   terminateClient(clientId);
   res.json({ message: `Client ${clientId} terminated successfully` });
-});
+};
 
 // POST /api/clients/end
-exports.terminateClients = wrap(async (req, res) => {
+exports.terminateClients = async (req, res) => {
     const { clientId } = req.body;
 
     if (!clientId) {
         return res.status(400).json({ message: 'Client ID is required' });
     }
 
-    let clientsToTerminate = {};
+    let clientsToTerminate;
 
     if (clientId === 'all') {
         clientsToTerminate = getAllClients();
-    } else if (Array.isArray(clientId)) {
-        const clientIds = clientId.flatMap(id => id.split(',').map(id => id.trim()));
-        clientsToTerminate = clientIds.reduce((acc, id) => {
-            const client = getClient(id);
-            if (client) {
-                acc[id] = client;
-            }
-            return acc;
-        }, {});
-    } else if (typeof clientId === 'string') {
-        const clientIds = clientId.split(',').map(id => id.trim());
-        clientsToTerminate = clientIds.reduce((acc, id) => {
-            const client = getClient(id);
-            if (client) {
-                acc[id] = client;
-            }
-            return acc;
-        }, {});
     } else {
-        return res.status(400).json({ message: 'Invalid clientId format' });
+        const clientIds = (Array.isArray(clientId) ? clientId : [clientId])
+            .flatMap(id => String(id).split(','))
+            .map(id => id.trim())
+            .filter(id => id);
+
+        clientsToTerminate = clientIds.reduce((acc, id) => {
+            const client = getClient(id);
+            if (client) {
+                acc[id] = client;
+            }
+            return acc;
+        }, {});
     }
 
     if (Object.keys(clientsToTerminate).length === 0) {
         return res.status(404).json({ message: 'No clients found to terminate' });
     }
 
-    await terminateAllClientsService();
-    logClientEvent('all', 'info', 'Requested clients terminated successfully');
-    res.json({ message: 'Requested clients terminated successfully' });
-});
-
-exports.getQrCode = wrap(async (req, res) => {
-    const { userID } = req.params;
-    if (!userID) {
-        return res.status(400).json({ message: 'User ID is required' });
+    if (clientId === 'all') {
+        await terminateAllClientsService();
+        logClientEvent('all', 'info', 'All clients terminated successfully.');
+        return res.json({ message: 'All clients terminated successfully.' });
     }
 
-    let clientEntry = getClient(userID);
+    const { default: pLimit } = await import('p-limit');
+    const limit = pLimit(5); // Concurrently terminate up to 5 clients
 
-    if (clientEntry && clientEntry.isActive) {
-        return res.json({ message: 'Client is already active' });
-    }
+    const clientIds = Object.keys(clientsToTerminate);
+    const terminationPromises = clientIds.map(id =>
+        limit(() => terminateClient(id))
+    );
 
-    try {
-        // If client doesn't exist or isn't initializing, start it.
-        if (!clientEntry || !clientEntry.isInitializing) {
-            // Start initialization but don't wait for it to complete here
-            initializeClient(userID).catch(err => {
-                // The promise rejection is handled by the caller of initializeClient,
-                // but we log it here for visibility during the QR flow.
-                logClientEvent(userID, 'error', `Background initialization failed: ${err.message}`);
-            });
-            // Re-fetch clientEntry to get the updated object with qrPromise
-            clientEntry = getClient(userID);
-            if (!clientEntry) {
-                // This case should ideally not happen if initializeClient successfully forks a process
-                return res.status(500).json({ message: `Failed to initialize client process for ${userID}.` });
-            }
-        }
-        
-        // Wait specifically for the QR code from the clientEntry's promise
-        const qr = await clientEntry.qrPromise;
-        res.json({ qr });
+    await Promise.all(terminationPromises);
 
-    } catch (error) {
-        res.status(500).json({ message: `Failed to get QR code for client ${userID}: ${error.message}` });
-    }
-});
+    const terminatedIds = clientIds.join(', ');
+    logClientEvent('multiple', 'info', `Terminated clients: ${terminatedIds}`);
+    res.json({ message: `Successfully terminated clients: ${terminatedIds}` });
+};
 
-exports.streamQrUpdates = wrap(async (req, res) => {
+exports.streamQrUpdates = async (req, res) => {
     const { userID } = req.params;
     if (!userID) {
         return res.status(400).json({ message: 'User ID is required' });
@@ -215,4 +184,4 @@ exports.streamQrUpdates = wrap(async (req, res) => {
         res.write('data: ' + JSON.stringify({ error: error.message || 'Failed to start QR stream' }) + '\n\n');
         res.end(); // End the stream on critical error
     }
-});
+};

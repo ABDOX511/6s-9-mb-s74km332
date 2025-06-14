@@ -1,8 +1,8 @@
 const router = require('express').Router();
-const wrap   = require('../middlewares/asyncWrapper');
+const asyncWrapper   = require('../middlewares/asyncWrapper');
 const messageController = require('../controllers/messageController');
 
 // POST /api/messages
-router.post('/', wrap(messageController.sendMessage));
+router.post('/', asyncWrapper(messageController.sendMessage));
 
 module.exports = router;

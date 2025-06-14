@@ -6,45 +6,14 @@ const {
 
 const {
   getClient,
-  terminateClient,
-  getAllClients,
-  terminateAllClientsService,
-  initializeClient,
   sendImmediateMessage
 } = require(path.join(SERVICES_DIR, 'clientService'));
 const { extractMediaPath, createMessageMedia } = require(path.join(UTILS_DIR, 'mediaUtils'));
 const { logMessageStatus } = require(path.join(UTILS_DIR, 'logUtils'));
-const wrap = require('../middlewares/asyncWrapper');
 const redis = require('../config/redisClient'); // Import Redis client
 
-// Function to send a message to a client
-const sendMessageToClient = (clientProcess, phoneNumber, message, mediaPath, userId, leadID) => {
-    return new Promise((resolve, reject) => {
-        const messageHandler = (msg) => {
-            if (msg.type === 'message_sent' && msg.phoneNumber === phoneNumber) {
-                resolve();
-                clientProcess.off('message', messageHandler); // Remove listener
-            } else if (msg.type === 'message_error' && msg.phoneNumber === phoneNumber) {
-                reject(new Error(msg.error));
-                clientProcess.off('message', messageHandler); // Remove listener
-            }
-        };
-
-        clientProcess.on('message', messageHandler);
-
-        // Extract media path if not provided directly
-        if (!mediaPath) {
-            const extracted = extractMediaPath(message);
-            mediaPath = extracted.mediaPath;
-            message = extracted.cleanMessage;
-        }
-
-        clientProcess.send({ type: 'send_message', phoneNumber, message, mediaPath, userId, leadID });
-    });
-};
-
 // Function to handle incoming send message requests
-exports.sendMessage = wrap(async (req, res) => {
+exports.sendMessage = async (req, res) => {
     const requestData = req.body.request;
     if (!requestData) {
         return res.status(400).json({ message: 'Request data is missing' });
@@ -102,4 +71,4 @@ exports.sendMessage = wrap(async (req, res) => {
         logMessageStatus(clientID, phoneNumber, 'failed', leadID, error.message);
         return res.status(500).json({ message: `Failed to send immediate message: ${error.message}`, status: 'undelivered' });
     }
-});
+};
