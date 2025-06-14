@@ -2,7 +2,6 @@ require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
 const path = require('path');
-const mongoose = require('mongoose');
 const {VIEWS_DIR, UTILS_DIR, PUBLIC_DIR} = require('./config/paths');
 const { terminateAllClientsService } = require('./services/clientService');
 const { cleanupOrphanedClients } = require('./services/clientStateService');
@@ -10,12 +9,6 @@ const { logServerEvent } = require(path.join(UTILS_DIR, 'logUtils'));
 const routes = require('./routes');
 const app = express();
 const PORT = process.env.PORT || 3000;
-
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://mongo:27017/whatsapp-sessions';
-
-mongoose.connect(MONGO_URI)
-  .then(() => logServerEvent('info', 'Connected to MongoDB'))
-  .catch(err => logServerEvent('error', `MongoDB connection error: ${err.message}`));
 
 app.use(express.static(PUBLIC_DIR));
 app.use(bodyParser.json());
