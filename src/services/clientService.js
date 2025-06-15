@@ -10,6 +10,8 @@ const { DATA_AUTH } = require('../config/paths');
 
 const clients = {};
 
+const QR_TIMEOUT_MS = 120000; // 2 minutes (120,000 milliseconds) for QR scan/authentication
+
 /**
  * The primary client cleanup function. It terminates the client process and then,
  * based on the `fullCleanup` flag, either wipes all associated data (Redis, Mongo, local files)
@@ -175,6 +177,33 @@ const initializeClient = (clientId) => {
             isReady: false, // Explicitly track ready state
             qrPromise: qrPromise, // Expose QR promise
             initializationPromise: initializationPromise, // Store the main initialization promise
+            qrTimeout: null, // Initialize qrTimeout to null
+        };
+
+        // --- Start QR Timeout ---
+        clients[clientId].qrTimeout = setTimeout(async () => {
+            const currentClientEntry = clients[clientId];
+            // Only terminate if the client is still in an initializing or qr_ready state
+            if (currentClientEntry && !currentClientEntry.isActive && !currentClientEntry.isReady) {
+                logClientEvent(clientId, 'warn', `Client ${clientId} QR/Authentication timeout reached. Terminating due to no QR scan or successful authentication.`);
+                await cleanupClient(clientId, { fullCleanup: true }); // Perform full cleanup
+                if (rejectInitializationPromise) {
+                    rejectInitializationPromise(new Error('QR scan/Authentication timed out.'));
+                }
+            } else {
+                logClientEvent(clientId, 'debug', `QR timeout for ${clientId} triggered, but client is already active/ready or terminated. No action needed.`);
+            }
+        }, QR_TIMEOUT_MS);
+        logClientEvent(clientId, 'debug', `QR timeout set for ${clientId} (${QR_TIMEOUT_MS / 1000}s).`);
+        // --- End QR Timeout ---
+
+        // Helper to clear the QR timeout
+        const clearQrTimeout = (id) => {
+            if (clients[id] && clients[id].qrTimeout) {
+                clearTimeout(clients[id].qrTimeout);
+                clients[id].qrTimeout = null;
+                logClientEvent(id, 'debug', 'QR timeout cleared.');
+            }
         };
 
         clientProcess.on('message', (msg) => {
@@ -198,6 +227,7 @@ const initializeClient = (clientId) => {
                         clients[clientId].isInitializing = false;
                         resolveInitializationPromise();
                     }
+                    clearQrTimeout(clientId); // Clear timeout on ready
                     break;
                 case 'remote_session_saved':
                     clients[clientId].isActive = true;
@@ -205,6 +235,7 @@ const initializeClient = (clientId) => {
                     logClientEvent(clientId, 'info', 'Client session saved and is now fully active.');
                     setClientState(clientId, { status: 'active' });
                     resolveInitializationPromise();
+                    clearQrTimeout(clientId); // Clear timeout on session saved
                     break;
                 case 'disconnected':
                     clients[clientId].isActive = false;
@@ -213,6 +244,7 @@ const initializeClient = (clientId) => {
                     cleanupClient(clientId, { fullCleanup: true }).catch(err => {
                          logClientEvent(clientId, 'error', `Error during post-disconnect cleanup: ${err.message}`);
                     });
+                    clearQrTimeout(clientId); // Clear timeout on disconnect
                     break;
                 case 'auth_failure':
                     clients[clientId].isActive = false;
@@ -224,6 +256,7 @@ const initializeClient = (clientId) => {
                     cleanupClient(clientId, { fullCleanup: true }).catch(err => {
                         logClientEvent(clientId, 'error', `Error during post-auth_failure cleanup: ${err.message}`);
                     });
+                    clearQrTimeout(clientId); // Clear timeout on auth failure
                     break;
                 case 'error':
                     logClientEvent(clientId, 'error', `Client process error: ${msg.error}`);
@@ -233,6 +266,7 @@ const initializeClient = (clientId) => {
                             logClientEvent(clientId, 'error', `Error during post-critical-error cleanup: ${err.message}`);
                         });
                     }
+                    clearQrTimeout(clientId); // Clear timeout on any process error
                     break;
                 case 'init_error':
                     clients[clientId].isInitializing = false;
@@ -243,11 +277,11 @@ const initializeClient = (clientId) => {
                     cleanupClient(clientId, { fullCleanup: true }).catch(err => {
                         logClientEvent(clientId, 'error', `Error during post-init_error cleanup: ${err.message}`);
                     });
+                    clearQrTimeout(clientId); // Clear timeout on init error
                     break;
                 case 'terminated':
-                    // This message confirms the child process has shut down. The calling function
-                    // (`cleanupClient`) will handle the subsequent data state management.
                     logClientEvent(clientId, 'info', `Received 'terminated' signal from client process ${clientId}.`);
+                    clearQrTimeout(clientId); // Clear timeout on graceful termination
                     break;
                 case 'qr':
                     if (clients[clientId]?.isInitializing) {
@@ -256,6 +290,7 @@ const initializeClient = (clientId) => {
                     }
                     setClientState(clientId, { status: 'qr_ready' });
                     resolveQrPromise(msg.qr);
+                    // Do NOT clear timeout here. This means QR is shown, still waiting for scan.
                     break;
                 case 'message_sent':
                     break;
@@ -275,7 +310,7 @@ const initializeClient = (clientId) => {
             if (clients[clientId]?.isInitializing && rejectInitializationPromise) {
                 rejectInitializationPromise(new Error(`Client process exited unexpectedly during initialization.`));
             }
-            // If entry was in-memory, it's now cleaned up by cleanupClient
+            clearQrTimeout(clientId); // Clear timeout on process exit
         });
 
         clientProcess.on('error', async (error) => {
@@ -288,6 +323,7 @@ const initializeClient = (clientId) => {
             if (clients[clientId]?.isInitializing && rejectInitializationPromise) {
                 rejectInitializationPromise(new Error(`Client process error during initialization: ${error.message}`));
             }
+            clearQrTimeout(clientId); // Clear timeout on process error
         });
     });
 };
