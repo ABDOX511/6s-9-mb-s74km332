@@ -11,6 +11,8 @@ const routes = require('./routes');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+const memoryMonitor = require('./services/memoryMonitor'); // Import the new memory monitor
+
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://mongo:27017/whatsapp-sessions';
 
 mongoose.connect(MONGO_URI)
@@ -60,6 +62,7 @@ process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 // Perform cleanup and start the server
 (async () => {
     await cleanupOrphanedClients();
+    memoryMonitor.start(); // Start the memory monitor here
     app.listen(PORT, () => {
         logServerEvent('info', `Server is running on http://localhost:${PORT}`);
         console.log(`Server is running on http://localhost:${PORT}`);

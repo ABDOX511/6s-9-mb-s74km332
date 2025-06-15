@@ -72,7 +72,12 @@ const processRedisQueue = async (clientId, client) => {
         });
         logClientEvent(clientId, 'info', 'Successfully connected to MongoDB');
 
-        const store = new MongoStore({ mongoose: mongoose });
+        const store = new MongoStore({ mongoose: mongoose,
+            clientId: clientId,
+            backupSyncIntervalMs: 300000, // Increased to 5 minutes (300000ms)
+            compression: true, // Enable compression
+            compressionLevel: 6 // Set compression level
+        });
 
         const client = new Client({
             authStrategy: new RemoteAuth({
