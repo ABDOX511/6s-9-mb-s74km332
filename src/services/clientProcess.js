@@ -3,9 +3,7 @@ const fs = require('fs');
 const qrcode = require('qrcode-terminal');
 const puppeteer = require('puppeteer');
 const { DATA_AUTH, UTILS_DIR, CONFIG_DIR } = require('../config/paths');
-const { Client, RemoteAuth } = require('whatsapp-web.js');
-const { MongoStore } = require('wwebjs-mongo');
-const mongoose = require('mongoose');
+const { Client, LocalAuth } = require('whatsapp-web.js');
 const redis = require('../config/redisClient'); // Import Redis client
 const { getConfig } = require('../utils/configManager'); // Import config for delays
 
@@ -66,24 +64,10 @@ const processRedisQueue = async (clientId, client) => {
     logClientEvent(clientId, 'info', `Client process starting for clientId: ${clientId}`);
 
     try {
-        // Connect to MongoDB with a timeout
-        await mongoose.connect('mongodb://mongo:27017/whatsapp-sessions', {
-            serverSelectionTimeoutMS: 5000 // 5-second timeout to select a server
-        });
-        logClientEvent(clientId, 'info', 'Successfully connected to MongoDB');
-
-        const store = new MongoStore({ mongoose: mongoose,
-            clientId: clientId,
-            backupSyncIntervalMs: 300000, // Increased to 5 minutes (300000ms)
-            compression: true, // Enable compression
-            compressionLevel: 6 // Set compression level
-        });
-
         const client = new Client({
-            authStrategy: new RemoteAuth({
-                store: store,
+            authStrategy: new LocalAuth({
                 clientId: clientId,
-                backupSyncIntervalMs: 60000 // A 1-minute backup sync interval
+                dataPath: DATA_AUTH // Store sessions under /data/.wwebjs_auth
             }),
             puppeteer: {
                 headless: true,
@@ -133,14 +117,6 @@ const processRedisQueue = async (clientId, client) => {
             });
         });
         
-        client.on('remote_session_saved', () => {
-            logClientEvent(clientId, 'info', 'Remote session has been saved to MongoDB.');
-            if (process.send) {
-                logClientEvent(clientId, 'debug', 'Sending REMOTE_SESSION_SAVED event to parent process.');
-                process.send({ type: 'remote_session_saved', clientId });
-            }
-        });
-
         client.on('disconnected', (reason) => {
             logClientEvent(clientId, 'warn', `Client disconnected: ${reason}`);
             if (process.send) process.send({ type: 'disconnected', clientId });
@@ -166,7 +142,6 @@ const processRedisQueue = async (clientId, client) => {
             if (msg.type === 'terminate') {
                 logClientEvent(clientId, 'info', 'Termination requested');
                 try {
-                    await store.save(); // Explicitly save session before destroying
                     await client.destroy();
                     logClientEvent(clientId, 'info', 'Client destroyed successfully');
                     if (process.send) process.send({ type: 'terminated', clientId });

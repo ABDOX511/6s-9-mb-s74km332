@@ -12,8 +12,15 @@ COPY package*.json ./
 # Install application dependencies
 RUN npm install
 
-# Install Chromium and its dependencies
-RUN apk add --no-cache chromium nss freetype freetype-dev harfbuzz ca-certificates
+# Install Chromium and its dependencies (minimal set for Puppeteer in Alpine)
+# Based on recommendations for smaller image size
+RUN apk add --no-cache \
+    chromium \
+    nss \
+    freetype \
+    harfbuzz \
+    ca-certificates \
+    ttf-freefont # Common font package often needed
 
 # Set the PUPPETEER_EXECUTABLE_PATH for whatsapp-web.js to find Chromium
 ENV PUPPETEER_EXECUTABLE_PATH="/usr/bin/chromium-browser"

@@ -2,7 +2,8 @@
 const mime = require('mime-types');
 const fs = require('fs').promises;
 const path = require('path');
-const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
+// Remove the custom fetch polyfill as Node.js 20+ has a global fetch
+// const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 const { MessageMedia } = require('whatsapp-web.js');
 
 const MAX_MEDIA_SIZE = 10 * 1024 * 1024; // 10MB
@@ -24,7 +25,7 @@ const createMessageMedia = async (mediaPath, message) => {
         let mediaType = mime.lookup(mediaPath) || 'application/octet-stream';
 
         if (mediaPath.startsWith('http://') || mediaPath.startsWith('https://')) {
-            const response = await fetch(mediaPath);
+            const response = await fetch(mediaPath); // Use global fetch
             if (!response.ok) {
                 throw new Error(`Failed to fetch media from URL: ${response.statusText}`);
             }
