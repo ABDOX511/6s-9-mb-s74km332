@@ -23,6 +23,17 @@ app.get('/indexar', (req, res) => {
   res.sendFile(path.join(VIEWS_DIR, 'indexar.html'));
 });
 
+// Serve the zoho integration page
+app.get('/zoho-integration', (req, res) => {
+  // Add headers to prevent caching for this HTML page
+  res.set({
+      'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+      'Pragma': 'no-cache',
+      'Expires': '0'
+  });
+  res.sendFile(path.join(VIEWS_DIR, 'zoho-integration.html'));
+});
+
 // Serve the user-specific QR page
 app.get('/user/:userID([0-9]+)', (req, res) => {
   res.sendFile(`${VIEWS_DIR}/user-qr.html`);

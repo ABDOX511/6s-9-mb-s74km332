@@ -35,7 +35,7 @@ const transports = [
                 return log;
             })
         ),
-        level: 'info' // Revert to info for console output
+        level: 'debug' // Temporarily set to debug for console output
     }),
     // Combined server logs for all levels, organized by date folder
     new DailyRotateFile({

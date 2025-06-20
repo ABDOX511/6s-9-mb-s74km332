@@ -118,47 +118,38 @@ const initializeClient = (clientId) => {
                 return existingClientEntry.initializationPromise;
             }
 
-            // Case 3: Client exists in memory but is in a problematic or stale state.
-            // This is when we trigger `cleanupClient` with a full wipe if necessary.
-            logClientEvent(clientId, 'warn', `Client ${clientId} found in an invalid state (disconnected, auth_failure, init_error, or stale). Attempting pre-initialization cleanup.`);
+            // Case 3: Client exists in memory but is in a problematic or stale state (not active/ready, not initializing).
+            // Check if we have a saved session before doing full cleanup
+            const clientAuthDir = path.join(DATA_AUTH, `session-${clientId}`);
+            const hasExistingSession = await fs.pathExists(clientAuthDir);
+            
+            if (hasExistingSession) {
+                logClientEvent(clientId, 'info', `Client ${clientId} found in stale state but has existing session. Performing graceful cleanup.`);
+                // Graceful cleanup to preserve session
+                await cleanupClient(clientId, { fullCleanup: false }).catch(err => {
+                    logClientEvent(clientId, 'error', `Error during graceful cleanup for ${clientId}: ${err.message}`);
+                });
+            } else {
+                logClientEvent(clientId, 'warn', `Client ${clientId} found in invalid state with no session. Performing full cleanup.`);
+                // Full cleanup if no session exists
+                await cleanupClient(clientId, { fullCleanup: true }).catch(err => {
+                    logClientEvent(clientId, 'error', `Error during pre-initialization full cleanup for ${clientId}: ${err.message}`);
+                });
+            }
 
-            // Add a robust check for the process's actual existence before trying to signal it.
-            let processIsRunning = false;
+            // Attempt to kill the process if it exists and is running unexpectedly
             if (existingClientEntry.process && existingClientEntry.process.pid) {
                 try {
                     process.kill(existingClientEntry.process.pid, 0); // Check if process exists (throws if not)
-                    processIsRunning = true;
+                    logClientEvent(clientId, 'info', `Found and about to terminate stale process ${existingClientEntry.process.pid} for client ${clientId}.`);
+                    // Force kill to ensure no lingering process prevents new one
+                    existingClientEntry.process.kill('SIGKILL');
                 } catch (e) {
                     if (e.code !== 'ESRCH') { // ESRCH means process doesn't exist, which is fine
-                        logClientEvent(clientId, 'error', `Error checking process ${existingClientEntry.process.pid} for client ${clientId}: ${e.message}`);
+                        logClientEvent(clientId, 'error', `Error checking or killing stale process ${existingClientEntry.process.pid} for client ${clientId}: ${e.message}`);
                     }
                 }
             }
-
-            // Determine if a full cleanup is required based on process status and persisted state
-            const clientStateFromRedis = await getClientState(clientId);
-            const status = clientStateFromRedis.status;
-
-            const shouldPerformFullCleanup = (
-                processIsRunning ||
-                status === 'auth_failure' ||
-                status === 'init_error'
-            );
-
-            if (shouldPerformFullCleanup) {
-                // Perform full cleanup if the process is running unexpectedly or if it's an authentication/initialization failure
-                logClientEvent(clientId, 'info', `Client ${clientId} requires full cleanup based on process status or problematic state ('${status}').`);
-                await cleanupClient(clientId, { fullCleanup: true });
-            } else if (status === 'disconnected') {
-                // If disconnected, but not an auth_failure/init_error, don't wipe session data, just update in-memory state
-                logClientEvent(clientId, 'info', `Client ${clientId} is disconnected but session data is presumed valid. Updating in-memory state.`);
-                delete clients[clientId]; // Remove from in-memory to allow fresh init without full data wipe
-            } else {
-                 // For any other unexpected stale state where no process is running and not critical status, perform full data cleanup as a precaution.
-                 logClientEvent(clientId, 'info', `Stale in-memory entry for ${clientId} detected (process not running, status not critical). Performing full data cleanup as a precaution.`);
-                 await cleanupClient(clientId, { fullCleanup: true });
-            }
-            // After potential cleanup, `clients[clientId]` should be undefined now, allowing a fresh start.
         }
 
         // No existing client or existing one was cleaned up, proceed to fork a new process
@@ -241,12 +232,21 @@ const initializeClient = (clientId) => {
                     clients[clientId].isActive = true; // With LocalAuth, consider the client fully active once ready
                     logClientEvent(clientId, 'info', 'Client is ready, session data saved locally.');
                     setClientState(clientId, { status: 'active' });
-                    resolveInitializationPromise();
+                    
+                    // Add a small delay to ensure the client is truly ready for messaging
+                    setTimeout(() => {
+                        resolveInitializationPromise();
+                    }, 1000);
+                    
                     clearQrTimeout(clientId); // Clear timeout on ready
                     break;
                 case 'disconnected':
                     clients[clientId].isActive = false;
                     logClientEvent(clientId, 'warn', `Client disconnected: ${msg.reason || 'No reason provided'}`);
+                    // Update Redis state to disconnected on remote disconnect
+                    await setClientState(clientId, { status: 'disconnected' }).catch(err => {
+                        logClientEvent(clientId, 'error', `Failed to set Redis status to 'disconnected' on client disconnect: ${err.message}`);
+                    });
                     // A remote disconnect is a problematic state that requires a full cleanup to ensure a clean restart.
                     cleanupClient(clientId, { fullCleanup: true }).catch(err => {
                          logClientEvent(clientId, 'error', `Error during post-disconnect cleanup: ${err.message}`);
@@ -267,11 +267,13 @@ const initializeClient = (clientId) => {
                     break;
                 case 'error':
                     logClientEvent(clientId, 'error', `Client process error: ${msg.error}`);
-                    if (msg.error.includes('Execution context was destroyed')) {
-                        logClientEvent(clientId, 'error', `Critical browser error detected. Triggering full client cleanup for ${clientId}.`);
-                        cleanupClient(clientId, { fullCleanup: true }).catch(err => {
-                            logClientEvent(clientId, 'error', `Error during post-critical-error cleanup: ${err.message}`);
-                        });
+                    // Any client error indicates a problematic state, trigger full cleanup.
+                    cleanupClient(clientId, { fullCleanup: true }).catch(err => {
+                        logClientEvent(clientId, 'error', `Error during cleanup after client process error: ${err.message}`);
+                    });
+                    // If the initialization promise was still pending, reject it.
+                    if (clients[clientId]?.isInitializing && clients[clientId]?.initializationPromise) {
+                        clients[clientId].initializationPromise.reject(new Error(`Client process error during initialization: ${msg.error}`));
                     }
                     clearQrTimeout(clientId); // Clear timeout on any process error
                     break;
@@ -308,14 +310,22 @@ const initializeClient = (clientId) => {
 
         // Ensure cleanup on unexpected exit/error of child process
         clientProcess.on('exit', async (code, signal) => {
-            logClientEvent(clientId, 'warn', `Client process ${clientId} exited unexpectedly with code ${code}, signal ${signal}. Triggering full cleanup.`);
+            // Code 130 is normal when server is stopped with Ctrl+C (SIGINT)
+            const isNormalExit = code === 0 || (code === 130 && signal === null);
+            const logLevel = isNormalExit ? 'info' : 'warn';
+            const message = isNormalExit 
+                ? `Client process ${clientId} exited normally with code ${code}, signal ${signal}.`
+                : `Client process ${clientId} exited unexpectedly with code ${code}, signal ${signal}. Triggering full cleanup.`;
+            
+            logClientEvent(clientId, logLevel, message);
+            
             // An unexpected exit is considered a problematic state requiring a full cleanup.
             await cleanupClient(clientId, { fullCleanup: true }).catch(err => {
                 logClientEvent(clientId, 'error', `Error during exit cleanup for ${clientId}: ${err.message}`);
             });
             // If the initialization promise was still pending, reject it.
             if (clients[clientId]?.isInitializing && clients[clientId]?.initializationPromise) {
-                clients[clientId].initializationPromise.reject(new Error(`Client process exited unexpectedly during initialization.`));
+                clients[clientId].initializationPromise.reject(new Error(`Client process exited during initialization.`));
             }
             clearQrTimeout(clientId); // Clear timeout on process exit
         });
@@ -343,29 +353,9 @@ const initializeClient = (clientId) => {
  * @param {string} clientId The ID of the client to terminate.
  * @returns {Promise<void>}
  */
-const terminateClient = (clientId) => {
-    return new Promise(async (resolve, reject) => {
-        const clientEntry = clients[clientId];
-        if (!clientEntry) {
-            logClientEvent(clientId, 'warn', `Attempted to terminate non-existent or non-running client ${clientId}. Ensuring state is 'disconnected'.`);
-            // If not in memory, just ensure the persisted state reflects disconnection.
-            await setClientState(clientId, { status: 'disconnected' }).catch(err => {});
-            return resolve();
-        }
-
-        if (clientEntry.isDestroying) {
-            logClientEvent(clientId, 'info', `Client ${clientId} is already being gracefully terminated.`);
-            return resolve();
-        }
-
-        clientEntry.isDestroying = true;
-        logClientEvent(clientId, 'info', `Initiating graceful shutdown for client ${clientId}...`);
-        
-        // Use the new cleanup function with fullCleanup set to false.
-        await cleanupClient(clientId, { fullCleanup: false });
-        
-        logClientEvent(clientId, 'info', `Graceful shutdown complete for client ${clientId}.`);
-        resolve();
+const terminateClient = async (clientId, options = {}) => {
+    await cleanupClient(clientId, options).catch(err => {
+        logClientEvent(clientId, 'error', `Error in terminateClient (controller called): ${err.message}`);
     });
 };
 
@@ -402,15 +392,19 @@ const sendImmediateMessage = (clientId, messageData) => {
             return reject(new Error(`Client process not found for clientId: ${clientId}`));
         }
 
+        logClientEvent(clientId, 'debug', `Sending immediate message with leadID: ${messageData.leadID}`);
+
         const messageTimeout = setTimeout(() => {
+            cleanup();
             reject(new Error('Immediate message send timed out.'));
         }, 30000); // 30-second timeout
 
         const onMessageResponse = (msg) => {
-            if (msg.type === 'immediate_message_sent' && msg.leadID === messageData.leadID) {
+            logClientEvent(clientId, 'debug', `Received response: ${msg.type}, leadID: ${msg.leadID}, expected: ${messageData.leadID}`);
+            if (msg.type === 'immediate_message_sent' && String(msg.leadID) === String(messageData.leadID)) {
                 cleanup();
                 resolve();
-            } else if (msg.type === 'immediate_message_error' && msg.leadID === messageData.leadID) {
+            } else if (msg.type === 'immediate_message_error' && String(msg.leadID) === String(messageData.leadID)) {
                 cleanup();
                 reject(new Error(msg.error));
             }
@@ -434,4 +428,5 @@ module.exports = {
     terminateAllClientsService,
     sendImmediateMessage
 };
+
 

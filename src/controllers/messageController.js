@@ -37,9 +37,14 @@ exports.sendMessage = async (req, res) => {
 
     // Client must exist and be fully ready (session saved) to send messages.
     const clientEntry = getClient(clientID);
-    if (!clientEntry || !clientEntry.isReady) {
-        const statusMessage = !clientEntry ? 'Client not initialized' : 'Client is not ready yet (session may be synchronizing)';
-        return res.status(400).json({ message: `Failed to send message: ${statusMessage}`, status: 'undelivered' });
+    if (!clientEntry || !clientEntry.isReady || !clientEntry.isActive) {
+        let statusMessage = 'Client not initialized';
+        if (clientEntry && !clientEntry.isReady) {
+            statusMessage = 'Client is not ready yet (session may be synchronizing)';
+        } else if (clientEntry && !clientEntry.isActive) {
+            statusMessage = 'Client is not active yet (still initializing)';
+        }
+        return res.status(400).json({ success: false, message: `Failed to send message: ${statusMessage}`, status: 'undelivered' });
     }
 
     let finalMediaPath = mediaPath;
@@ -66,9 +71,9 @@ exports.sendMessage = async (req, res) => {
     try {
         await sendImmediateMessage(clientID, messageData);
         logMessageStatus(clientID, phoneNumber, 'sent', leadID);
-        return res.json({ message: 'Message sent successfully', status: 'delivered', OWNER_ID: leadID });
+        return res.json({ success: true, message: 'Message sent successfully', status: 'delivered', OWNER_ID: leadID });
     } catch (error) {
         logMessageStatus(clientID, phoneNumber, 'failed', leadID, error.message);
-        return res.status(500).json({ message: `Failed to send immediate message: ${error.message}`, status: 'undelivered' });
+        return res.status(500).json({ success: false, message: `Failed to send immediate message: ${error.message}`, status: 'undelivered' });
     }
 };

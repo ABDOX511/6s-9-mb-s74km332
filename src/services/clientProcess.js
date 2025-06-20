@@ -104,17 +104,35 @@ const processRedisQueue = async (clientId, client) => {
             }
         });
 
-        client.on('ready', () => {
+        client.on('ready', async () => {
             logClientEvent(clientId, 'info', 'Client is ready and authenticated');
             console.log(`Client ${clientId} is ready!`); 
+            
+            // Wait a moment to ensure WhatsApp Web is fully loaded
+            await delayExecution(2000);
+            
+            // Verify client is actually ready to send messages
+            try {
+                const info = await client.getState();
+                logClientEvent(clientId, 'info', `Client state: ${info}`);
+                
             if (process.send) {
                 logClientEvent(clientId, 'debug', 'Sending READY event to parent process.');
                 process.send({ type: 'ready', clientId });
             }
+                
             // Start processing Redis queue when client is ready
             processRedisQueue(clientId, client).catch(error => {
                 logClientEvent(clientId, 'error', `Failed to start Redis queue processing: ${error.message}`);
             });
+            } catch (error) {
+                logClientEvent(clientId, 'warn', `Client ready but not fully initialized: ${error.message}. Retrying in 3 seconds...`);
+                setTimeout(async () => {
+                    if (process.send) {
+                        process.send({ type: 'ready', clientId });
+                    }
+                }, 3000);
+            }
         });
         
         client.on('disconnected', (reason) => {
@@ -152,7 +170,7 @@ const processRedisQueue = async (clientId, client) => {
                     process.exit(1);
                 }
             } else if (msg.type === 'send_immediate_message') {
-                logClientEvent(clientId, 'info', `Received immediate message request for ${msg.phoneNumber}`);
+                logClientEvent(clientId, 'info', `Received immediate message request for ${msg.phoneNumber}, leadID: ${msg.leadID}`);
                 try {
                     const { phoneNumber, message, mediaPath, userId, leadID } = msg;
                     if (mediaPath) {
@@ -161,7 +179,8 @@ const processRedisQueue = async (clientId, client) => {
                     } else {
                         await client.sendMessage(phoneNumber, message);
                     }
-                    if (process.send) process.send({ type: 'immediate_message_sent', leadID: msg.leadID });
+                    logClientEvent(clientId, 'info', `Message sent successfully to ${phoneNumber}, sending response with leadID: ${leadID}`);
+                    if (process.send) process.send({ type: 'immediate_message_sent', leadID });
                 } catch (error) {
                     logMessageStatus(msg.userId, msg.phoneNumber, 'failed', msg.leadID, error.message); 
                     logClientEvent(clientId, 'error', `Failed to send immediate message: ${error.message}`);
@@ -176,10 +195,10 @@ const processRedisQueue = async (clientId, client) => {
         logClientEvent(clientId, 'debug', 'client.initialize() completed.');
 
     } catch (error) {
-        logClientEvent(process.argv[2], 'error', `Client process failed to start: ${error.message}`);
+        logClientEvent(process.argv[2], 'error', `Client process failed to start or encountered unhandled error: ${error.message}`);
         if (process.send) {
             process.send({ type: 'init_error', clientId: process.argv[2], error: error.message });
         }
-        process.exit(1);
+        process.exit(1); // Ensure the process exits with a non-zero code on unhandled errors
     }
 })();

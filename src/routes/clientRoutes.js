@@ -12,5 +12,7 @@ router.post('/end',     asyncWrapper(clientController.terminateClients));
 router.post('/terminate/:id', asyncWrapper(clientController.terminateClient));
 // GET /api/clients/qr-updates/:userID
 router.get('/qr-updates/:userID', asyncWrapper(clientController.streamQrUpdates));
+// GET /api/clients/status/:userID
+router.get('/status/:userID', asyncWrapper(clientController.getClientStatus));
 
 module.exports = router;

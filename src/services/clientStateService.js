@@ -82,6 +82,8 @@ const cleanupOrphanedClients = async () => {
             action = ACTION.HARD; // Running process that shouldn't be implies hard cleanup
         } else if (['auth_failure', 'init_error'].includes(status)) {
             action = ACTION.HARD; // Critical errors require hard cleanup
+        } else if ((status === 'active' || status === 'ready') && !processIsRunning) {
+            action = ACTION.SOFT; // Stale active/ready state without a running process - preserve session data
         } else if (status !== 'disconnected' && status !== 'active' && status !== 'ready' && status !== 'qr_ready') {
             // If not running, and not explicitly disconnected/active/ready/qr_ready, consider it stale and soft cleanup
             action = ACTION.SOFT;

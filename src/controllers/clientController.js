@@ -7,8 +7,8 @@ const {
   terminateAllClientsService,
   initializeClient
 } = require(path.join(SERVICES_DIR, 'clientService'));
-
 const { logClientEvent } = require(path.join(UTILS_DIR, 'logUtils'));
+const { getClientState } = require(path.join(SERVICES_DIR, 'clientStateService')); // Import getClientState
 
 // POST /api/clients/add
 exports.addClient = async (req, res) => {
@@ -31,7 +31,7 @@ exports.terminateClient = async (req, res) => {
       return res.status(400).json({ message: 'Client ID is required' });
   }
 
-  terminateClient(clientId);
+  await terminateClient(clientId);
   res.json({ message: `Client ${clientId} terminated successfully` });
 };
 
@@ -85,6 +85,38 @@ exports.terminateClients = async (req, res) => {
     const terminatedIds = clientIds.join(', ');
     logClientEvent('multiple', 'info', `Terminated clients: ${terminatedIds}`);
     res.json({ message: `Successfully terminated clients: ${terminatedIds}` });
+};
+
+// GET /api/clients/status/:userID
+exports.getClientStatus = async (req, res) => {
+    // Add headers to prevent caching for this endpoint
+    res.set({
+        'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+    });
+
+    const { userID } = req.params;
+    if (!userID) {
+        return res.status(400).json({ message: 'User ID is required' });
+    }
+
+    const clientEntry = getClient(userID);
+    const clientState = await getClientState(userID); // Fetch Redis state regardless
+
+    logClientEvent(userID, 'debug', `getClientStatus: In-memory clientEntry: ${JSON.stringify(clientEntry)}`);
+    logClientEvent(userID, 'debug', `getClientStatus: Redis clientState: ${JSON.stringify(clientState)}`);
+
+    // Client is only truly connected if it exists in memory AND is active/ready
+    if (clientEntry && (clientEntry.isActive || clientEntry.isReady)) {
+        logClientEvent(userID, 'debug', `getClientStatus: Returning connected: true based on in-memory state.`);
+        return res.json({ connected: true });
+    } else {
+        // If no in-memory client or not active/ready, always return false
+        // Redis state alone is not sufficient - we need an actual running process
+        logClientEvent(userID, 'debug', `getClientStatus: Returning connected: false. In-memory: ${!!clientEntry}, Redis: ${clientState?.status || 'none'}`);
+        return res.json({ connected: false });
+    }
 };
 
 exports.streamQrUpdates = async (req, res) => {
@@ -144,6 +176,10 @@ exports.streamQrUpdates = async (req, res) => {
             res.write('data: ' + JSON.stringify({ error: `Authentication failed: ${msg.error}` }) + '\n\n');
         } else if (msg.type === 'init_error' && msg.clientId === userID) {
             res.write('data: ' + JSON.stringify({ error: `Initialization failed: ${msg.error}` }) + '\n\n');
+        } else if (msg.type === 'terminated' && msg.clientId === userID) { // Handle explicit termination from child process
+            logClientEvent(userID, 'info', `Client ${userID} reported itself terminated via SSE.`);
+            res.write('data: ' + JSON.stringify({ message: 'Client terminated' }) + '\n\n');
+            res.end(); // End the stream if the client explicitly terminated
         }
     };
 
@@ -152,6 +188,15 @@ exports.streamQrUpdates = async (req, res) => {
         initializeClient(userID).catch(err => {
             // Log this error but don't stop the SSE stream
             logClientEvent(userID, 'error', `Background SSE client initialization failed: ${err.message}`);
+            // If initialization fails, proactively send an error to the client
+            if (!res.writableEnded) {
+                res.write('data: ' + JSON.stringify({ error: `Initialization failed: ${err.message}` }) + '\n\n');
+                res.end(); // Close the stream immediately on initialization error
+            }
+            // Crucially, perform a full cleanup on backend if initialization fails
+            terminateClient(userID, { fullCleanup: true }).catch(cleanupErr => {
+                logClientEvent(userID, 'error', `Error during cleanup after failed background initialization for ${userID}: ${cleanupErr.message}`);
+            });
         });
 
         // Wait for the client entry and process to be available
@@ -164,32 +209,65 @@ exports.streamQrUpdates = async (req, res) => {
         if (clientEntry.qrPromise) {
             // Use Promise.race to handle both resolution and rejection of qrPromise
             Promise.race([
-                clientEntry.qrPromise.then(qr => { 
+                clientEntry.qrPromise.then(qr => {
                     if (qr) res.write('data: ' + JSON.stringify({ qr: qr }) + '\n\n');
                 }),
                 clientEntry.initializationPromise.catch(err => {
                     // If initializationPromise rejects (e.g., auth_failure from background)
                     res.write('data: ' + JSON.stringify({ error: `Initialization failed: ${err.message}` }) + '\n\n');
+                    res.end(); // Close the stream if initializationPromise rejects
                 })
             ]).catch(err => {
                 // Catch any uncaught errors from the race
                 logClientEvent(userID, 'error', `Error in qrPromise race for SSE: ${err.message}`);
+                if (!res.writableEnded) {
+                    res.write('data: ' + JSON.stringify({ error: `QR stream error: ${err.message}` }) + '\n\n');
+                    res.end(); // Close the stream on unhandled race error
+                }
+                // Perform full cleanup on backend if QR promise or initialization promise rejects unexpectedly
+                terminateClient(userID, { fullCleanup: true }).catch(cleanupErr => {
+                    logClientEvent(userID, 'error', `Error during cleanup after failed QR/Initialization race for ${userID}: ${cleanupErr.message}`);
+                });
             });
-        } else if (clientEntry.isActive) {
-            res.write('data: ' + JSON.stringify({ message: 'Client is already active' }) + '\n\n');
+
+            // Set a timeout for the QR code stream itself to close if not ready within 2 minutes
+            const qrStreamTimeout = setTimeout(() => {
+                if (res.writableEnded) return; // If response is already ended, do nothing
+                logClientEvent(userID, 'warn', `QR stream for ${userID} timed out after 2 minutes.`);
+                res.write('data: ' + JSON.stringify({ error: 'QR code stream timed out. Please refresh the page.' }) + '\n\n');
+                res.end();
+            }, 120000); // 2 minutes
+
+            // Handle client disconnection (browser tab closed)
+            req.on('close', () => {
+                logClientEvent(userID, 'info', `SSE connection for client ${userID} closed by client.`);
+                clearTimeout(qrStreamTimeout); // Clear the timeout if it's still active
+                clientEntry.process.off('message', onQR); // Remove the listener
+
+                // DO NOT terminate the client when SSE closes - let it keep running
+                // The client should persist so it can be used when the popup is reopened
+                logClientEvent(userID, 'info', `Client ${userID} will continue running in background.`);
+
+                // Ensure response is ended if not already
+                if (!res.writableEnded) {
+                    res.end();
+                }
+            });
+
+        } else if (clientEntry.isReady || clientEntry.isActive) {
+            // If client is already ready, send ready message and close stream
+            res.write('data: ' + JSON.stringify({ message: 'Client is ready' }) + '\n\n');
+            res.end();
+        } else {
+            // Fallback for unexpected states, or if process hasn't sent QR/ready yet
+            res.write('data: ' + JSON.stringify({ message: 'Waiting for client to become ready...' }) + '\n\n');
         }
 
-        // Handle client disconnect (browser closing connection)
-        req.on('close', () => {
-            logClientEvent(userID, 'info', 'SSE connection closed by client.');
-            if (clientEntry) {
-                clientEntry.process.off('message', onQR);
-            }
-        });
-
     } catch (error) {
-        logClientEvent(userID, 'error', `SSE stream error for client ${userID}: ${error.message}`);
-        res.write('data: ' + JSON.stringify({ error: error.message || 'Failed to start QR stream' }) + '\n\n');
-        res.end(); // End the stream on critical error
+        logClientEvent(userID, 'error', `Error in streamQrUpdates for ${userID}: ${error.message}`);
+        if (!res.writableEnded) {
+            res.write('data: ' + JSON.stringify({ error: `Server error: ${error.message}` }) + '\n\n');
+            res.end();
+        }
     }
 };
