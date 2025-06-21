@@ -14,8 +14,19 @@ const memoryMonitor = require('./services/memoryMonitor'); // Import the new mem
 
 // MongoDB connection removed because sessions are now stored locally using LocalAuth.
 
+app.use((req, res, next) => {
+  logServerEvent('debug', `Incoming request: ${req.method} ${req.url}`);
+  next();
+});
+
 app.use(express.static(PUBLIC_DIR));
 app.use(bodyParser.json());
+
+app.use((req, res, next) => {
+  logServerEvent('debug', `After body-parser, before API routes. Method: ${req.method}, URL: ${req.url}, Body: ${JSON.stringify(req.body)}`);
+  next();
+});
+
 app.use('/api', routes);
 
 // Serve the admin page (with user ID input)
@@ -32,6 +43,17 @@ app.get('/zoho-integration', (req, res) => {
       'Expires': '0'
   });
   res.sendFile(path.join(VIEWS_DIR, 'zoho-integration.html'));
+});
+
+// Serve the zoho widget page
+app.get('/zoho-widget', (req, res) => {
+  // Add headers to prevent caching for this HTML page
+  res.set({
+      'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+      'Pragma': 'no-cache',
+      'Expires': '0'
+  });
+  res.sendFile(path.join(VIEWS_DIR, 'zoho-widget.html'));
 });
 
 // Serve the user-specific QR page

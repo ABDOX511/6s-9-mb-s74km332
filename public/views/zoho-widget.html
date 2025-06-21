@@ -568,9 +568,12 @@
 
   <script>
     // Global variables
-    let userId = 'N/A';
-    let phone = 'N/A';
-    let leadId = 'N/A';
+    let userId = 'N/A'; // This will store the current Zoho CRM user's ID
+    let leadIds = [];   // This will store an array of lead IDs for campaigns
+    let currentUser = null; // Object to store current Zoho CRM user details
+    let currentLeadPhone = 'N/A'; // NEW: To store phone for single lead
+    let isSingleLeadMode = false; // NEW: Flag for single lead vs campaign
+
     let eventSource = null;
     let qrcodeInstance = null;
     let isConnecting = false;
@@ -654,7 +657,7 @@
     };
 
     // Initialize the application
-    const initializeApp = async () => {
+    const initializeApp = async () => { // Made async to await Zoho SDK calls
       showLoading(true, 'Initializing...');
       setupUIBasedOnConnectionStatus(false);
 
@@ -662,10 +665,10 @@
       try {
         await ZOHO.embeddedApp.init(); // Initialize SDK
         const userResponse = await ZOHO.CRM.CONFIG.getCurrentUser();
-        const currentUser = userResponse.users[0] || {};
+        currentUser = userResponse.users[0] || {};
         userId = currentUser.id; // Set global userId to current CRM user's ID
 
-        if (!userId || userId === 'N/A') {
+        if (!userId) {
           showStatus('Could not determine current Zoho CRM user. Please check permissions.', 'error');
           showLoading(false);
           return;
@@ -691,50 +694,70 @@
       }
     };
 
-    // Zoho CRM Integration - now primarily to get lead data
-    ZOHO.embeddedApp.on("PageLoad", function(data) {
-        const fetchedLeadId = data.EntityId;
+    // Helper to fetch details for every Lead (phone, names, …)
+    async function fetchLeadDetails(ids){
+      const detailPromises = ids.map(id =>
+          ZOHO.CRM.API.getRecord({Entity:"Leads", RecordID:id})
+      );
+      const responses = await Promise.all(detailPromises);
+
+      return responses.map(r => {
+          const d = r.data && r.data[0] ? r.data[0] : {}; // Handle potential empty data array
+          return {
+             id         : d.id,
+             phone      : d.Phone       || d.Mobile || "", // Prioritize Mobile, then Phone
+             first_name : d.First_Name  || "",
+             last_name  : d.Last_Name   || ""
+          };
+      }).filter(lead => lead.phone); // Filter out leads without a phone number
+    }
+
+    // Zoho CRM Integration - now primarily to get lead IDs and determine mode
+    ZOHO.embeddedApp.on("PageLoad", async function(data) { // Made async here
+        // Ensure leadIds is always an array
+        leadIds = Array.isArray(data.EntityId) ? data.EntityId : (data.EntityId ? [data.EntityId] : []);
       
-        if (!fetchedLeadId) {
-        showStatus('No lead selected in Zoho CRM', 'error');
-        showLoading(false);
+        if (leadIds.length === 0) {
+            showStatus('No leads selected. Please select leads from Zoho CRM.', 'error');
+            // Do not call showLoading(false) directly, setupUIBasedOnConnectionStatus will handle it.
+            setupUIBasedOnConnectionStatus(false); 
             return;
         }
 
-      leadId = fetchedLeadId;
-      showLoading(true, 'Fetching lead data...');
-
-        ZOHO.CRM.API.getRecord({Entity: "Leads", RecordID: leadId})
-        .then(function(response) {
-                if (response.data && response.data[0]) {
-                    const lead = response.data[0];
-            phone = lead.Mobile || lead.Phone || 'N/A'; // Get phone from lead
-
-                    if (phone === 'N/A') {
-              showStatus('No phone number found for this lead', 'error');
-              showLoading(false);
-              return;
+        if (leadIds.length === 1) {
+            isSingleLeadMode = true;
+            showLoading(true, 'Fetching lead phone number...');
+            try {
+                const singleLeadResponse = await ZOHO.CRM.API.getRecord({Entity: "Leads", RecordID: leadIds[0]});
+                if (singleLeadResponse.data && singleLeadResponse.data[0]) {
+                    const lead = singleLeadResponse.data[0];
+                    currentLeadPhone = lead.Mobile || lead.Phone || 'N/A';
+                    if (currentLeadPhone === 'N/A') {
+                        showStatus('No phone number found for this lead. Cannot send message.', 'error');
                     }
-
-            // UI setup is handled by initializeApp based on global userId connection status.
-            // Just hide loading if it was still showing from lead fetch
-                showLoading(false);
-
                 } else {
-            showStatus('No lead data found in Zoho CRM', 'error');
-            showLoading(false);
+                    showStatus('Lead data not found for selected record.', 'error');
                 }
-            })
-            .catch(function(error) {
-                console.error('Error fetching lead from Zoho CRM:', error);
-          showStatus('Error fetching lead data from Zoho', 'error');
-          showLoading(false);
-            });
+            } catch (error) {
+                console.error('Error fetching single lead details:', error);
+                showStatus('Error fetching lead details for single message.', 'error');
+            }
+            showLoading(false);
+            // Update the message title for single send
+            elements.messageSection.querySelector('.message-title').innerHTML = `<i class="fas fa-paper-plane"></i> Send Message to ${currentLeadPhone !== 'N/A' ? currentLeadPhone : 'Selected Lead'}`;
+
+        } else { // leadIds.length > 1 (Campaign mode)
+            isSingleLeadMode = false;
+            // Update message title for campaign
+            elements.messageSection.querySelector('.message-title').innerHTML = `<i class="fas fa-paper-plane"></i> Send Campaign to ${leadIds.length} Leads`;
+            showLoading(false);
+        }
+        // The UI will be set up by setupUIBasedOnConnectionStatus (called from initializeApp)
     });
 
-    // Connect button handler
+    // Connect button handler - remains largely the same, using the global 'userId'
     elements.connectBtn.addEventListener('click', () => {
-      if (isConnecting || !userId || userId === 'N/A') { // Added check for userId here
+      if (isConnecting || !userId || userId === 'N/A') {
         showStatus('User ID not available or already connecting.', 'info');
         return;
       }
@@ -746,7 +769,7 @@
       closeEventSource();
       clearQRCode(); // Clear any existing QR code
 
-      // Create Server-Sent Events connection
+      // Create Server-Sent Events connection using the global userId (currentUser.id)
       eventSource = new EventSource(`/api/clients/qr-updates/${userId}`);
       
         eventSource.onmessage = (event) => {
@@ -757,7 +780,7 @@
             showLoading(false);
             showSection('qr-section');
             
-            // Clear container before creating new QR code[1][6]
+            // Clear container before creating new QR code
             clearQRCode();
             
             // Generate QR code with error handling
@@ -823,8 +846,8 @@
       };
     });
 
-    // Send message handler
-    const sendMessage = () => {
+    // Send message handler - MODIFIED FOR CAMPAIGN SENDING AND SINGLE MESSAGE
+    const sendMessage = async () => {
       const message = elements.msgInput.value.trim();
       
       if (!message) {
@@ -832,64 +855,104 @@
         return;
       }
 
-      if (phone === 'N/A') {
-        showStatus('No phone number available', 'error');
+      if (!userId || userId === 'N/A') {
+        showStatus('WhatsApp user is not identified. Please reconnect.', 'error');
         return;
       }
 
       elements.sendBtn.disabled = true;
       showLoading(true, 'Sending message...');
 
-      const payload = {
-        request: {
-          properties: { 
-            phone_number: phone, 
-            message_text: message 
-          },
-          auth: { 
-            user_id: userId 
-          },
-          bindings: [{ 
-            OWNER_ID: leadId 
-          }]
-        }
-      };
+      try {
+        let payload;
+        let endpoint;
+        let successMessage;
 
-      fetch('/api/messages', {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json' 
-        },
-        body: JSON.stringify(payload)
-      })
-      .then(r => r.json())
-      .then(res => {
+        if (isSingleLeadMode) {
+            if (currentLeadPhone === 'N/A') {
+                showStatus('No phone number available for the selected lead.', 'error');
+                showLoading(false);
+                elements.sendBtn.disabled = false;
+                return;
+            }
+            payload = {
+                request: {
+                    properties: { 
+                        phone_number: currentLeadPhone, 
+                        message_text: message 
+                    },
+                    auth: { 
+                        user_id: userId 
+                    },
+                    bindings: [{ 
+                        OWNER_ID: leadIds[0] // Use the single leadId
+                    }]
+                }
+            };
+            endpoint = '/api/messages';
+            successMessage = 'Message sent successfully!';
+            showLoading(true, 'Sending message to single lead...');
+
+        } else { // Campaign mode
+      if (leadIds.length === 0) {
+        showStatus('No leads selected for this campaign.', 'error');
+                showLoading(false);
+                elements.sendBtn.disabled = false;
+        return;
+      }
+        const leadsToSend = await fetchLeadDetails(leadIds);
+
+        if (leadsToSend.length === 0) {
+          showStatus('No valid phone numbers found for selected leads. Campaign aborted.', 'error');
+                showLoading(false);
+                elements.sendBtn.disabled = false;
+          return;
+        }
+
+            payload = {
+          message: message,
+          module_id: "zoho", // The new identifier for Zoho campaigns
+          user: userId,       // The ID of the current Zoho CRM user
+          leads: leadsToSend  // The array of lead objects with phone numbers
+        };
+            endpoint = '/api/zoho/campaigns';
+            successMessage = `Campaign queued successfully! ${leadsToSend.length} messages added to queue.`;
+        showLoading(true, `Queuing ${leadsToSend.length} messages...`);
+        }
+
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(payload)
+        });
+
+        const data = await res.json();
         showLoading(false);
         
-        if (res.success) {
+        if (res.ok || data.success) { // Check for HTTP success status (2xx) or specific success flag
           elements.msgInput.value = '';
           elements.msgInput.style.height = 'auto'; // Reset textarea height
-          showStatus('Message sent successfully!', 'success');
+            showStatus(successMessage, 'success');
         } else {
-          // If client is not ready, show a more helpful message
-          if (res.message && res.message.includes('not ready') || res.message.includes('not active')) {
-            showStatus('WhatsApp is still connecting. Please wait a moment and try again.', 'info');
-          } else {
-            showStatus(res.message || 'Failed to send message', 'error');
-          }
+            // If client is not ready, show a more helpful message
+            if (data.message && (data.message.includes('not ready') || data.message.includes('not active'))) {
+                showStatus('WhatsApp is still connecting. Please wait a moment and try again.', 'info');
+            } else {
+                showStatus(data.message || 'Failed to send message', 'error');
+            }
         }
-      })
-      .catch(err => {
+      } catch (err) {
         console.error('Message send error:', err);
         showLoading(false);
-        showStatus('Error sending message', 'error');
-      })
-      .finally(() => {
+        showStatus('Error sending message: ' + err.message, 'error');
+      } finally {
         elements.sendBtn.disabled = false;
-      });
+      }
     };
 
-    // Event listeners
+    // Event listeners - remain largely the same
     elements.sendBtn.addEventListener('click', sendMessage);
     
     elements.msgInput.addEventListener('keydown', (e) => {
@@ -899,16 +962,16 @@
       }
     });
 
-    // Auto-resize textarea
+    // Auto-resize textarea - remains the same
     elements.msgInput.addEventListener('input', function() {
       this.style.height = 'auto';
       this.style.height = Math.min(this.scrollHeight, 120) + 'px';
     });
-    
-    // Initialize app
+
+    // Initialize app - changed to call directly as it now handles Zoho SDK init
     initializeApp();
 
-    // Cleanup on page unload
+    // Cleanup on page unload - remains the same
     window.addEventListener('beforeunload', () => {
       closeEventSource();
       clearQRCode();

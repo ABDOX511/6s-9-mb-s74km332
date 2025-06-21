@@ -1,0 +1,122 @@
+<!--  === /zoho-widget/widget.html  ===================================== -->
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Send campaign</title>
+
+  <!-- Zoho CRM Widget SDK -->
+  <script src="https://live.zwidgets.com/js-sdk/1.0/ZohoEmbededAppSDK.min.js"></script>
+
+  <style>
+    body{font-family:Arial,Helvetica,sans-serif;margin:20px;width:360px}
+    h3{margin:0 0 10px}
+    textarea{width:100%;height:120px;resize:vertical}
+    button{margin-top:12px;padding:8px 18px;cursor:pointer}
+    #status{margin-top:12px;color:#008000;font-weight:bold;display:none}
+    #error {margin-top:12px;color:#D8000C;font-weight:bold;display:none}
+  </style>
+</head>
+
+<body>
+  <h3>Message to send</h3>
+  <textarea id="msg" placeholder="Type your WhatsApp / SMS message here"></textarea>
+  <button id="sendBtn">Send</button>
+  <div id="status">Sending…</div>
+  <div id="error"></div>
+
+<script>
+/*-----------------------------------------------------------------------
+ * Global vars filled by SDK events
+ *---------------------------------------------------------------------*/
+let leadIds     = [];   // array with the selected record IDs
+let currentUser = null; // object with current user details
+
+/*-----------------------------------------------------------------------
+ * 1. Initialise SDK, grab context & current user
+ *---------------------------------------------------------------------*/
+ZOHO.embeddedApp.on("PageLoad", data => {
+  leadIds = data.EntityId;                 // IDs passed by mass-action button
+});
+ZOHO.embeddedApp.init().then(async () => {
+  /* getCurrentUser returns { users : [ { id, full_name, email, … } ] } */
+  const u = await ZOHO.CRM.CONFIG.getCurrentUser();   // SDK call
+  currentUser = u.users[0] || {};
+});
+
+/*-----------------------------------------------------------------------
+ * 2. Helper – fetch details for every Lead (phone, names, …)
+ *---------------------------------------------------------------------*/
+async function fetchLeadDetails(ids){
+  const detailPromises = ids.map(id =>
+      ZOHO.CRM.API.getRecord({Entity:"Leads", RecordID:id})
+  );
+  const responses = await Promise.all(detailPromises);
+
+  return responses.map(r => {
+      const d = r.data[0] || {};
+      return {
+         id         : d.id,
+         phone      : d.Phone       || d.Mobile || "",
+         first_name : d.First_Name  || "",
+         last_name  : d.Last_Name   || ""
+      };
+  });
+}
+
+/*-----------------------------------------------------------------------
+ * 3. Click handler
+ *---------------------------------------------------------------------*/
+document.getElementById("sendBtn").onclick = async () => {
+  const txt        = document.getElementById("msg").value.trim();
+  const errorBox   = document.getElementById("error");
+  const statusBox  = document.getElementById("status");
+  errorBox.style.display  = "none";
+
+  if(!txt){
+     errorBox.textContent = "Please type a message.";
+     errorBox.style.display = "block";
+     return;
+  }
+
+  statusBox.textContent = "Building payload…";
+  statusBox.style.display = "block";
+
+  try{
+      /* 3a – lead data */
+      const leads = await fetchLeadDetails(leadIds);
+
+      /* 3b – assemble payload (includes user id) */
+      const payload = {
+         message : txt,
+         user    : currentUser.id || "",   // CRM user-ID
+         leads   : leads
+      };
+
+      /* 3c – POST to backend */
+      statusBox.textContent = "Sending to server…";
+      const res = await fetch("https://amusing-workable-mole.ngrok-free.app/api/zoho/campaigns",{
+          method  : "POST",
+          headers : {"Content-Type":"application/json"},
+          body    : JSON.stringify(payload)
+      });
+
+      if(!res.ok){
+         throw new Error("Server responded " + res.status);
+      }
+
+      statusBox.textContent = "Sent successfully!";
+      setTimeout(()=>{
+          ZOHO.CRM.UI.Popup.close();
+          ZOHO.CRM.UI.showToast({type:"success", message:"Campaign queued"});
+      }, 800);
+
+  }catch(err){
+      errorBox.textContent  = "Error: " + err.message;
+      errorBox.style.display = "block";
+      statusBox.style.display = "none";
+  }
+};
+</script>
+</body>
+</html>

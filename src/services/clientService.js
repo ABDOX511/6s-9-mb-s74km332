@@ -378,7 +378,7 @@ const terminateAllClientsService = async () => {
     const limit = pLimit(5); // Concurrently terminate up to 5 clients
 
     const terminationPromises = allClientIds.map(clientId =>
-        limit(() => terminateClient(clientId))
+        limit(() => terminateClient(clientId, { fullCleanup: false }))
     );
 
     await Promise.all(terminationPromises);

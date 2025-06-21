@@ -9,13 +9,22 @@ const { MessageMedia } = require('whatsapp-web.js');
 const MAX_MEDIA_SIZE = 10 * 1024 * 1024; // 10MB
 
 const extractMediaPath = (message) => {
-    const mediaPathRegex = /(\b[A-Za-z]:\\[^ ]+\b)/g;
-    const mediaPaths = message.match(mediaPathRegex);
-    const cleanMessage = message.replace(mediaPathRegex, '').trim();
-    return {
-        mediaPath: mediaPaths ? mediaPaths[0] : null,
-        cleanMessage
-    };
+    // Only look for URLs with common media extensions
+    const mediaExtensions = ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'mp3', 'wav', 'mp4', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'opus'];
+    // This regex specifically targets http/https URLs ending with a media extension
+    const urlRegex = new RegExp(`(http[s]?:\\/\\/[^\\s]+\\.(?:${mediaExtensions.join('|')}))`, 'gi');
+
+    let mediaPath = null;
+    let cleanMessage = message;
+
+    const urlMatch = urlRegex.exec(message);
+    if (urlMatch) {
+        mediaPath = urlMatch[0];
+        cleanMessage = message.replace(urlMatch[0], '').trim();
+    }
+    // Removed: localPathRegex and its logic
+
+    return { mediaPath, cleanMessage };
 };
 
 const createMessageMedia = async (mediaPath, message) => {
